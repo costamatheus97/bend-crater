@@ -118,6 +118,8 @@ records how long its check took.
     starts slower than a release binary;
   - it held in the **previous run too**. A change seen in a single run is
     listed as a candidate.
+  - both checks **passed**. A failing check stops at its first error, so its
+    time is not comparable.
   The section also lists the slowest checks for each compiler.
 
 **Caveats:**

@@ -248,14 +248,14 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
       perf.appendChild(t);
     });
     if (!any) perf.appendChild(el("div", { style: "margin-top:8px", text: "No slowdowns or speedups over the threshold between main and " + (P.pairs[0] ? P.pairs[0].older : "the latest release") + ", or between consecutive releases (" + (P.pairs[0] ? P.pairs[0].compared : 0) + " packages compared on main)." }));
-    perf.appendChild(el("div", { style: "margin-top:12px" }, [el("b", { text: "Slowest checks per compiler" })]));
+    perf.appendChild(el("div", { style: "margin-top:12px" }, [el("b", { text: "Slowest passing checks per compiler" })]));
     var st = el("table");
     R.compilers.forEach(function (c) {
       var xs = (P.slowest || {})[c.id] || [];
       if (!xs.length) return;
       var tr = el("tr");
       tr.appendChild(el("td", { text: colName(c) }));
-      tr.appendChild(el("td", { cls: "mono", text: xs.slice(0, 3).map(function (x) { return x.pkg.length > 34 ? x.pkg.slice(0, 16) + "…" : x.pkg; }).join(", ") }));
+      tr.appendChild(el("td", { cls: "mono", text: xs.slice(0, 3).map(function (x) { return x.pkg.length > 30 ? x.pkg.slice(0, 14) + "…" : x.pkg; }).join(", ") }));
       tr.appendChild(el("td", { cls: "muted", text: xs.slice(0, 3).map(function (x) { return (x.ms / 1000).toFixed(1) + " s" + (x.rss_kb ? " / " + Math.round(x.rss_kb / 1024) + " MB" : ""); }).join(", ") }));
       st.appendChild(tr);
     });

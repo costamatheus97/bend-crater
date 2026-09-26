@@ -258,9 +258,12 @@ async function main(): Promise<void> {
   });
   const results: Record<string, Record<string, Cell>> = {};
   const tasks: [PkgRow, Col][] = [];
-  for (const r of rows) {
+  // Each package takes the compilers in a rotated order, so no compiler is
+  // always the first to touch a package (and pay for a cold disk cache).
+  rows.forEach((r, i) => {
     results[r.hash] = {};
-    for (const c of cols) {
+    const k = cols.length === 0 ? 0 : i % cols.length;
+    for (const c of [...cols.slice(k), ...cols.slice(0, k)]) {
       if (r.name === null && cfg.anon === "edges" && !edge.has(c.id)) {
         continue;
       }
@@ -272,7 +275,7 @@ async function main(): Promise<void> {
         tasks.push([r, c]);
       }
     }
-  }
+  });
   for (const r of rows) {
     if (r.fetch === undefined && r.roots.length > 0) {
       fs.writeFileSync(path.join(work, "w", r.hash + ".bend"),

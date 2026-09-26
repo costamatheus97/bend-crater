@@ -9,12 +9,14 @@
 //     startup time (its smoke check) is taken off, so a 60 ms check that
 //     becomes 150 ms, or main's Bun-from-source startup, is not a finding;
 //   - the same held in the previous run too. A change seen in one run only
-//     is listed as a candidate, not flagged.
+//     is listed as a candidate, not flagged;
+//   - both sides passed: a failing check stops at its first error.
 // Pairs compared: main against the latest release, and each release
 // against the one before it.
 
 import type { Cell, ColInfo, PkgRow } from "./report";
 import { cmpVersion } from "./compilers";
+import { isPass } from "./run";
 
 export const RATIO = 2;
 export const FLOOR_MS = 1000;
@@ -54,8 +56,10 @@ export interface Perf {
   slowest: Record<string, { hash: string; pkg: string; ms: number; rss_kb?: number }[]>;
 }
 
+// only a passing check is timed for comparison: a failing one stops at its
+// first error, so its time says nothing about the checker's speed
 const timed = (c: Cell | undefined): number | null =>
-  c === undefined || c.s === "timeout" || c.s === "skipped" || c.check_ms === undefined ? null : c.check_ms;
+  c === undefined || !isPass(c.s) || c.check_ms === undefined ? null : c.check_ms;
 
 export function updateTimings(prev: Timings | null, finished: string, results: Record<string, Record<string, Cell>>): Timings {
   const old = prev ?? { runs: [], t: {} };
@@ -141,7 +145,7 @@ export function analyse(cols: ColInfo[], pkgs: PkgRow[], results: Record<string,
   for (const c of ok) {
     slowest[c.id] = pkgs
       .map((p) => ({ p, cell: results[p.hash]?.[c.id] }))
-      .filter((x) => x.cell !== undefined && x.cell.check_ms !== undefined && x.cell.s !== "skipped")
+      .filter((x) => timed(x.cell) !== null)
       .sort((a, b) => (b.cell?.check_ms ?? 0) - (a.cell?.check_ms ?? 0))
       .slice(0, 5)
       .map(({ p, cell }) => ({ hash: p.hash, pkg: label(p), ms: cell?.check_ms ?? 0, ...(cell?.rss_kb ? { rss_kb: cell.rss_kb } : {}) }));
