@@ -24,7 +24,7 @@ jobs:
   # credentials, and the only token it sees is read-only and in one step.
   crater:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 340
     permissions:
       contents: read
     steps:
@@ -63,7 +63,7 @@ jobs:
 
       - name: Run the crater
         run: >
-          bun src/crater.ts --jobs 2 --no-nice
+          bun src/crater.ts --jobs 1 --no-nice
           --releases "${{ inputs.releases || '6' }}"
           --anon "${{ inputs.anon || 'edges' }}"
           --releases-json cache/releases.json
@@ -85,11 +85,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: crater-out
-          # exactly the three outputs: the run lane executes hub code, which
+          # exactly the four outputs: the run lane executes hub code, which
           # must not be able to add files that the publish job commits or serves
           path: |
             data/results.json
             data/history.json
+            data/timings.json
             docs/index.html
           retention-days: 7
 
@@ -110,10 +111,10 @@ jobs:
       - name: Commit results
         run: |
           git status --short
-          test -z "$(git status --porcelain --untracked-files=all | grep -vE '^( M|\?\?) (data/results.json|data/history.json|docs/index.html)$')" || { echo "unexpected files in the artifact"; exit 1; }
+          test -z "$(git status --porcelain --untracked-files=all | grep -vE '^( M|\?\?) (data/results.json|data/history.json|data/timings.json|docs/index.html)$')" || { echo "unexpected files in the artifact"; exit 1; }
           git config user.name "Matheus Costa"
           git config user.email "54296807+costamatheus97@users.noreply.github.com"
-          git add data/results.json data/history.json docs/index.html
+          git add data/results.json data/history.json data/timings.json docs/index.html
           if git diff --cached --quiet; then
             echo "no changes"
           else

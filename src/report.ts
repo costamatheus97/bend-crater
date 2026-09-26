@@ -2,6 +2,7 @@
 
 import type { Compiler } from "./compilers";
 import { cmpVersion } from "./compilers";
+import type { Perf } from "./perf";
 import { isFail, isPass, type Status } from "./run";
 
 export interface RunOutcome {
@@ -13,7 +14,8 @@ export interface RunOutcome {
 
 export interface Cell {
   s: Status;
-  ms: number;
+  check_ms?: number;         // wall time of the --check-only run (the last attempt)
+  rss_kb?: number;           // its peak RSS, when GNU time is available
   x?: string;                // first error lines
   run?: RunOutcome[];
 }
@@ -32,6 +34,16 @@ export interface PkgRow {
 
 export interface ColInfo extends Omit<Compiler, "cmd"> {
   broken?: string;           // the compiler failed its own smoke check
+  base_ms?: number;          // its smoke check's time: the startup cost in every cell
+}
+
+export interface Runner {
+  ci: boolean;
+  cpu: string;
+  nproc: number;
+  os: string;
+  bun: string;
+  rss: boolean;
 }
 
 export interface Regression {
@@ -55,10 +67,15 @@ export interface Results {
   results: Record<string, Record<string, Cell>>;
   regressions: Regression[];
   brokeIn: Record<string, string>;   // hash -> first release it fails on after passing
+  runner?: Runner;
+  timeoutS?: number;
+  perf?: Perf;
 }
 
 export interface HistoryEntry {
   finished: string;
+  cpu?: string;
+  flagged?: { pkg: string; newer: string; older: string; ratio: number }[];
   compilers: { id: string; version: string; sha?: string }[];
   counts: Record<string, Record<string, number>>;
   regressions: { pkg: string; kind: string; from: string; to: string }[];
@@ -149,6 +166,9 @@ export function historyEntry(r: Results): HistoryEntry {
     finished: r.finished,
     compilers: r.compilers.map((c) => ({ id: c.id, version: c.version, ...(c.sha ? { sha: c.sha } : {}) })),
     counts: counts(r),
+    ...(r.runner ? { cpu: r.runner.cpu } : {}),
+    flagged: (r.perf?.pairs ?? []).flatMap((p) => [...p.slowdowns, ...p.speedups])
+      .filter((x) => x.flagged).map((x) => ({ pkg: x.pkg, newer: x.newer, older: x.older, ratio: x.ratio })),
     regressions: r.regressions.map((g) => ({ pkg: g.pkg, kind: g.kind, from: g.from, to: g.to })),
   };
 }

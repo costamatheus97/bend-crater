@@ -81,7 +81,16 @@ thead th:first-child { left: 0; z-index: 3; }
 tbody th .h { display: block; color: var(--mut); font-size: 11px; font-weight: 400; }
 tr.grp th { background: var(--head); font-weight: 600; }
 td.c { text-align: center; padding: 3px 4px; }
-td.c button { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; border: 0; border-radius: 4px; padding: 6px 6px; min-width: 52px; cursor: pointer; }
+td.c button { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; border: 0; border-radius: 4px; padding: 5px 6px 4px; min-width: 52px; cursor: pointer; }
+td.c button small { display: block; font-weight: 400; font-size: 10px; margin-top: 3px; opacity: .8; }
+td.c button small.t1 { opacity: 1; font-weight: 700; text-decoration: underline; }
+td.c button small.t2 { opacity: 1; font-weight: 700; text-decoration: underline double; }
+.perf { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 14px; }
+.perf table { width: auto; font-size: 13px; margin: 4px 0 10px; }
+.perf td, .perf th { padding: 3px 10px 3px 0; border: 0; white-space: normal; }
+.perf .muted { color: var(--mut); }
+.perf .flag { color: var(--accent); font-weight: 700; }
+.tools select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
 td.c button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
 .s-pass { background: var(--pass); color: var(--pass-fg); }
 .s-pass-unsafe { background: var(--unsafe); color: var(--unsafe-fg); }
@@ -120,11 +129,15 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
 <h2>Regressions</h2>
 <div class="reg" id="reg"></div>
 
+<h2>Checker performance</h2>
+<div class="perf" id="perf"></div>
+
 <h2>Matrix</h2>
 <div class="legend" id="legend"></div>
 <div class="tools">
   <input type="search" id="q" placeholder="Filter packages" aria-label="Filter packages">
   <label><input type="checkbox" id="failing"> failing somewhere</label>
+  <label>order <select id="order"><option value="name">by name</option><option value="slow">slowest first</option></select></label>
   <label><input type="checkbox" id="anon"> anonymous hashes</label>
 </div>
 <div class="wrap"><table id="m"></table></div>
@@ -163,6 +176,12 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   function colName(c) { return c.kind === "main" ? "main" : c.id; }
   function colSub(c) { return c.kind === "main" ? (c.sha ? c.sha.slice(0, 7) : "") + " (" + c.version + ")" : c.kind === "release" ? (c.date || "").slice(0, 10) : "local"; }
   function pkgLabel(p) { return p.name ? p.name + "@" + p.version : p.hash; }
+  function secs(cell) {
+    if (cell.s === "timeout") return ">" + (R.timeoutS || "?") + " s";
+    var ms = cell.check_ms != null ? cell.check_ms : cell.ms;
+    if (ms == null || cell.s === "skipped") return "";
+    return (ms < 10000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000)) + " s";
+  }
   var isPass = function (s) { return s === "pass" || s === "pass-unsafe"; };
   var isFail = function (s) { return s && !isPass(s) && s !== "skipped"; };
 
@@ -205,6 +224,44 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   var broke = Object.keys(R.brokeIn || {}).length;
   if (broke) reg.appendChild(el("div", { cls: "v", style: "margin-top:8px;color:var(--mut);font-size:13px", text: broke + " package" + (broke === 1 ? "" : "s") + " passed on one release in the window and fail on the next: see the “broke in” column." }));
 
+  var perf = document.getElementById("perf"), P = R.perf;
+  if (!P) { perf.appendChild(el("div", { cls: "muted", text: "No timing data in this run." })); }
+  else {
+    var rn = R.runner || {};
+    perf.appendChild(el("div", { cls: "muted", text: "Each cell is one --check-only run, timed once per night on " + (rn.ci ? "a shared GitHub runner" : "a local machine") + (rn.cpu ? " (" + rn.cpu + ", " + rn.nproc + " threads, " + rn.os + ")" : "") + ". A change is flagged only when the newer compiler takes at least " + P.ratio + "× the older one's median for that package over the last " + P.runsKept + " run(s), the larger side is at least " + (P.floorMs / 1000) + " s after each compiler's startup (" + R.compilers.filter(function (c) { return c.base_ms != null; }).map(function (c) { return colName(c) + " " + c.base_ms + " ms"; }).join(", ") + ") is taken off, and the same held in the previous run. One-run changes are listed as candidates." }));
+    var flagged = [], any = false;
+    P.pairs.forEach(function (pr) {
+      var rowsP = pr.slowdowns.map(function (x) { return [x, "slower"]; }).concat(pr.speedups.map(function (x) { return [x, "faster"]; }));
+      if (!rowsP.length) return;
+      any = true;
+      perf.appendChild(el("div", { style: "margin-top:10px" }, [el("b", { text: pr.newer + " against " + pr.older })]));
+      var t = el("table");
+      rowsP.forEach(function (xr) {
+        var x = xr[0];
+        if (x.flagged) flagged.push(x);
+        var tr = el("tr");
+        tr.appendChild(el("td", { cls: "mono", text: x.pkg }));
+        tr.appendChild(el("td", { cls: x.flagged ? "flag" : "", text: (xr[1] === "slower" ? x.ratio + "× slower" : (1 / x.ratio).toFixed(1) + "× faster") + (x.flagged ? " (flagged)" : " (candidate)") }));
+        tr.appendChild(el("td", { cls: "muted", text: (x.oldMs / 1000).toFixed(1) + " s → " + (x.newMs / 1000).toFixed(1) + " s" }));
+        t.appendChild(tr);
+      });
+      perf.appendChild(t);
+    });
+    if (!any) perf.appendChild(el("div", { style: "margin-top:8px", text: "No slowdowns or speedups over the threshold between main and " + (P.pairs[0] ? P.pairs[0].older : "the latest release") + ", or between consecutive releases (" + (P.pairs[0] ? P.pairs[0].compared : 0) + " packages compared on main)." }));
+    perf.appendChild(el("div", { style: "margin-top:12px" }, [el("b", { text: "Slowest checks per compiler" })]));
+    var st = el("table");
+    R.compilers.forEach(function (c) {
+      var xs = (P.slowest || {})[c.id] || [];
+      if (!xs.length) return;
+      var tr = el("tr");
+      tr.appendChild(el("td", { text: colName(c) }));
+      tr.appendChild(el("td", { cls: "mono", text: xs.slice(0, 3).map(function (x) { return x.pkg.length > 34 ? x.pkg.slice(0, 16) + "…" : x.pkg; }).join(", ") }));
+      tr.appendChild(el("td", { cls: "muted", text: xs.slice(0, 3).map(function (x) { return (x.ms / 1000).toFixed(1) + " s" + (x.rss_kb ? " / " + Math.round(x.rss_kb / 1024) + " MB" : ""); }).join(", ") }));
+      st.appendChild(tr);
+    });
+    perf.appendChild(st);
+  }
+
   var legend = document.getElementById("legend");
   ORDER.concat(["skipped"]).forEach(function (s) { legend.appendChild(el("span", {}, [el("i", { cls: "s-" + s, text: SHORT[s] }), LONG[s]])); });
   legend.appendChild(el("span", {}, [el("i", { cls: "na", text: "·" }), "not run on this compiler"]));
@@ -224,23 +281,28 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     var tr = el("tr");
     var th = el("th", { scope: "row", title: pkgLabel(p) + "\\n" + p.hash }, [p.name ? p.name + "@" + p.version : p.hash.slice(0, 14) + "…", el("span", { cls: "h", text: p.name ? p.hash.slice(0, 12) + " · " + new Date(p.ts).toISOString().slice(0, 10) : new Date(p.ts).toISOString().slice(0, 10) + " · " + p.roots.join(", ") })]);
     tr.appendChild(th);
-    var failing = false;
+    var failing = false, slowMs = 0;
     cols.forEach(function (c) {
       var cell = row[c.id], td = el("td", { cls: "c" });
       if (!cell) { td.appendChild(el("span", { cls: "na", text: "·" })); }
       else {
         if (isFail(cell.s)) failing = true;
         var runBad = cell.run && cell.run.some(function (r) { return r.s !== "ok"; });
-        var b = el("button", { type: "button", cls: "s-" + cell.s, "aria-label": pkgLabel(p) + " on " + colName(c) + ": " + LONG[cell.s], text: SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : "") });
+        var t = secs(cell);
+        if (cell.check_ms != null && cell.check_ms > slowMs) slowMs = cell.check_ms;
+        if (cell.s === "timeout") slowMs = Infinity;
+        var b = el("button", { type: "button", cls: "s-" + cell.s, "aria-label": pkgLabel(p) + " on " + colName(c) + ": " + LONG[cell.s] + (t ? ", " + t : ""), title: t },
+          [SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : ""), t ? el("small", { cls: cell.s === "timeout" || cell.check_ms >= 10000 ? "t2" : cell.check_ms >= 1000 ? "t1" : "", text: t }) : null]);
         b.onclick = function () { show(p, c, cell); };
         td.appendChild(b);
       }
       tr.appendChild(td);
     });
     tr.appendChild(el("td", { cls: "broke", text: (R.brokeIn || {})[p.hash] || "" }));
-    rows.push({ tr: tr, p: p, failing: failing, text: (pkgLabel(p) + " " + p.hash + " " + p.roots.join(" ")).toLowerCase() });
+    rows.push({ tr: tr, p: p, failing: failing, slow: slowMs, text: (pkgLabel(p) + " " + p.hash + " " + p.roots.join(" ")).toLowerCase() });
   });
 
+  var order = document.getElementById("order");
   var q = document.getElementById("q"), fOnly = document.getElementById("failing"), fAnon = document.getElementById("anon");
   var anonCount = R.packages.filter(function (p) { return !p.name; }).length;
   fAnon.parentNode.lastChild.textContent = " anonymous hashes (" + anonCount + ")";
@@ -248,7 +310,8 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     var s = q.value.trim().toLowerCase();
     tbody.textContent = "";
     var group = null, shown = 0;
-    rows.forEach(function (r) {
+    var list = order.value === "slow" ? rows.slice().sort(function (a, b) { return (!a.p.name) - (!b.p.name) || b.slow - a.slow; }) : rows;
+    list.forEach(function (r) {
       if (!r.p.name && !fAnon.checked) return;
       if (fOnly.checked && !r.failing) return;
       if (s && r.text.indexOf(s) < 0) return;
@@ -258,7 +321,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     });
     if (!shown) { var tr = el("tr"); tr.appendChild(el("td", { colspan: String(cols.length + 2), cls: "na", text: "No package matches." })); tbody.appendChild(tr); }
   }
-  q.oninput = draw; fOnly.onchange = draw; fAnon.onchange = draw;
+  q.oninput = draw; fOnly.onchange = draw; fAnon.onchange = draw; order.onchange = draw;
   draw();
 
   var detail = document.getElementById("detail"), dc = document.getElementById("dc");
@@ -266,7 +329,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") detail.classList.remove("open"); });
   function show(p, c, cell) {
     dc.textContent = "";
-    dc.appendChild(el("div", { id: "dt" }, [el("b", { cls: "mono", text: pkgLabel(p) }), " on ", el("b", { text: colName(c) + (c.kind === "main" ? " @ " + (c.sha || "").slice(0, 7) : "") }), ": " + LONG[cell.s] + " (" + (cell.ms / 1000).toFixed(1) + " s)"]));
+    dc.appendChild(el("div", { id: "dt" }, [el("b", { cls: "mono", text: pkgLabel(p) }), " on ", el("b", { text: colName(c) + (c.kind === "main" ? " @ " + (c.sha || "").slice(0, 7) : "") }), ": " + LONG[cell.s] + " (" + (secs(cell) || "not timed") + (cell.rss_kb ? ", peak RSS " + Math.round(cell.rss_kb / 1024) + " MB" : "") + ")"]));
     dc.appendChild(el("div", { cls: "mono", style: "color:var(--mut);margin-top:4px", text: p.hash + " · entry " + p.roots.join(", ") + (p.deps.length ? " · imports " + p.deps.join(", ") : "") }));
     if (cell.x) dc.appendChild(el("pre", { text: cell.x }));
     (cell.run || []).forEach(function (r) {

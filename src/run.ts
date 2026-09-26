@@ -1,6 +1,9 @@
 // Running one compiler on one file under a timeout, and reading the verdict.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 export type Status =
   | "pass" | "pass-unsafe"
@@ -14,14 +17,40 @@ export interface Proc {
   err: string;
   ms: number;
   timedOut: boolean;
+  rssKb?: number;
 }
+
+// GNU time reports a child's peak RSS (-f %M, in KB). It is used when
+// /usr/bin/time exists and understands -f -o (GNU, as on ubuntu runners);
+// otherwise no RSS is recorded.
+let TIME: string | null | undefined;
+export function rssTool(): string | null {
+  if (TIME === undefined) {
+    TIME = null;
+    try {
+      const out = path.join(os.tmpdir(), "crater-rss-" + process.pid);
+      const r = spawnSync("/usr/bin/time", ["-f", "%M", "-o", out, "true"], { stdio: "ignore" });
+      if (r.status === 0 && /^\d+\s*$/m.test(fs.readFileSync(out, "utf8"))) {
+        TIME = "/usr/bin/time";
+      }
+      fs.rmSync(out, { force: true });
+    } catch {
+      TIME = null;
+    }
+  }
+  return TIME;
+}
+let rssSeq = 0;
 
 const CAP = 64 * 1024;
 
 // exec runs argv in its own process group and kills the whole group when
 // the timeout passes, so a compiler's workers go with it.
-export function exec(argv: string[], opts: { cwd: string; env: Record<string, string>; timeoutMs: number; nice: boolean }): Promise<Proc> {
-  const full = opts.nice ? ["nice", "-n", "19", ...argv] : argv;
+export function exec(argv: string[], opts: { cwd: string; env: Record<string, string>; timeoutMs: number; nice: boolean; rss?: boolean }): Promise<Proc> {
+  const time = opts.rss ? rssTool() : null;
+  const rssFile = time === null ? null : path.join(os.tmpdir(), `crater-rss-${process.pid}-${rssSeq++}`);
+  const timed = time === null ? argv : [time, "-f", "%M", "-o", rssFile as string, ...argv];
+  const full = opts.nice ? ["nice", "-n", "19", ...timed] : timed;
   const t0 = performance.now();
   return new Promise((resolve) => {
     const ch = spawn(full[0], full.slice(1), { cwd: opts.cwd, env: opts.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -34,9 +63,20 @@ export function exec(argv: string[], opts: { cwd: string; env: Record<string, st
     const timer = setTimeout(() => { timedOut = true; kill(); }, opts.timeoutMs);
     ch.on("error", (e) => { err += String(e); });
     ch.on("close", (code, signal) => {
+      const ms = Math.round(performance.now() - t0);
       clearTimeout(timer);
       kill();
-      resolve({ code, signal, out, err, ms: Math.round(performance.now() - t0), timedOut });
+      let rssKb: number | undefined;
+      if (rssFile !== null) {
+        try {
+          const last = fs.readFileSync(rssFile, "utf8").trim().split("\n").pop() ?? "";
+          rssKb = /^\d+$/.test(last) ? parseInt(last, 10) : undefined;
+        } catch { /* killed before time wrote it */ }
+        fs.rmSync(rssFile, { force: true });
+      }
+      // under GNU time, a child killed by a signal shows as exit 128+n
+      const sig = signal ?? (time !== null && code !== null && code > 128 && !timedOut ? "exit " + code : null);
+      resolve({ code, signal: sig, out, err, ms, timedOut, ...(rssKb !== undefined ? { rssKb } : {}) });
     });
   });
 }

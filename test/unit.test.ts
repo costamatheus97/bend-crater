@@ -35,7 +35,7 @@ function results(cells: Record<string, Record<string, string>>, main = "abc"): R
       : { id, kind: "release" as const, version: id }),
     packages: Object.keys(cells).map((h) => ({ hash: h, name: "p" + h, version: "1.0.0.0", ts: 0, roots: [], mains: [], foreign: false, deps: [] })),
     results: Object.fromEntries(Object.entries(cells).map(([h, r]) =>
-      [h, Object.fromEntries(Object.entries(r).map(([c, s]) => [c, { s: s as never, ms: 0 }]))])),
+      [h, Object.fromEntries(Object.entries(r).map(([c, s]) => [c, { s: s as never, check_ms: 0 }]))])),
     regressions: [], brokeIn: {},
   };
 }
@@ -58,4 +58,31 @@ test("a new latest release that breaks a package is listed once", () => {
   prev.compilers = prev.compilers.filter((c) => c.id !== "2.0.3");
   const cur = results({ a: { main: "fail-check", "2.0.3": "fail-check", "2.0.2": "pass" } });
   expect(regressions(cur, prev).map((g) => g.kind)).toEqual(["new-release"]);
+});
+
+test("timing: only large, repeated changes above the floor are flagged", async () => {
+  const { analyse, updateTimings } = await import("../src/perf");
+  const cols = [
+    { id: "main", kind: "main" as const, version: "2.0.3", base_ms: 300 },
+    { id: "2.0.3", kind: "release" as const, version: "2.0.3", base_ms: 100 },
+  ];
+  const pkgs = ["a", "b", "c"].map((h) => ({ hash: h, name: h, version: "1.0.0.0", ts: 0, roots: [], mains: [], foreign: false, deps: [] }));
+  const run = (a: number, b: number, c: number) => ({
+    a: { main: { s: "pass" as const, check_ms: a }, "2.0.3": { s: "pass" as const, check_ms: 5100 } },
+    b: { main: { s: "pass" as const, check_ms: b }, "2.0.3": { s: "pass" as const, check_ms: 400 } },
+    c: { main: { s: "pass" as const, check_ms: c }, "2.0.3": { s: "pass" as const, check_ms: 3100 } },
+  });
+  const lab = (p: { name: string | null }) => p.name ?? "";
+  // run 1: a is 3x slower on main (candidate), b is tiny, c is 2x faster
+  let tm = updateTimings(null, "r1", run(15300, 1200, 1300));
+  let perf = analyse(cols, pkgs, run(15300, 1200, 1300), tm, lab);
+  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.flagged])).toEqual([["a", false]]);
+  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.flagged])).toEqual([["c", false]]);
+  // run 2: the same again, so both are flagged
+  tm = updateTimings(tm, "r2", run(15300, 1200, 1300));
+  perf = analyse(cols, pkgs, run(15300, 1200, 1300), tm, lab);
+  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.flagged])).toEqual([["a", true]]);
+  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.flagged])).toEqual([["c", true]]);
+  expect(tm.t.a.main).toEqual([15300, 15300]);
+  expect(perf.slowest.main[0]).toEqual({ hash: "a", pkg: "a", ms: 15300 });
 });

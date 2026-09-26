@@ -41,7 +41,7 @@ before filing anything upstream.
    - `main`, from a fresh shallow clone, run from source with Bun;
    - optionally, a local `bend` binary.
 4. **Checks each package on each compiler:** `bend <wrapper> --check-only`,
-   with a 120 s timeout.
+   with a 600 s cap, and records the check's time.
    - The wrapper imports the package's entry files by hash, as a user of the
      package would: `import 0x<hash>/<entry>.bend as R0`. The hub does not
      record which file is the entry. `bend --publish` uploads exactly the
@@ -55,15 +55,18 @@ before filing anything upstream.
      foreign (`.c`/`.js`) effects, `main` is run once in an empty directory
      with a 20 s timeout. The cell is then marked ▸, or ▸! if that run exited
      non-zero or timed out. The run does not change the check's status.
-   - A timeout, crash or fetch failure is retried once.
+   - A crash or fetch failure is retried once. A timeout is not retried.
 5. **Compares.** Regressions are listed at the top of the page:
    - **next release:** passes on the latest release, fails on `main`;
    - **new release:** passed on the release before, fails on a release that
      came out since the last run;
    - **since last run:** the same compiler passed last run and fails now. For
      `main`, this compares against the previous run's `main`.
-6. **Writes** `data/results.json` (this run), `data/history.json` (a summary
-   of each of the last 90 runs) and `docs/index.html` (the page).
+6. **Writes:**
+   - `data/results.json`: this run;
+   - `data/history.json`: a summary of each of the last 90 runs;
+   - `data/timings.json`: check times for the last 14 runs;
+   - `docs/index.html`: the page.
 
 Anonymous hashes (published without a name) are checked on `main` and the
 latest release only, to keep the run short. `--anon all` checks them on
@@ -90,6 +93,42 @@ newest first. Click a cell to see the error lines.
 **broke in** names the first release in the window that fails a package
 which passed on the release before it.
 
+## Checker timing
+
+Checker speed can change a lot between compilers: one proof library took
+1804 s on 2.0.28 and 7.4 s with an open upstream PR. So each cell also
+records how long its check took.
+
+- **In each cell:** the wall time of the `--check-only` run appears under
+  the status. It is underlined from 1 s and double-underlined from 10 s. A
+  check has a cap of 600 s, and one that reaches it shows `>600 s`.
+  "Slowest first" reorders the matrix. Click a cell to see its time and, on
+  Linux with GNU `time`, its peak RSS.
+- **In the JSON:** each cell has `check_ms` and, when available, `rss_kb`.
+  `data/timings.json` keeps each cell's `check_ms` for the last 14 runs.
+  `results.json` records the runner's CPU model, thread count and OS image.
+- **The "Checker performance" section** compares `main` with the latest
+  release, and each release with the one before it. A change is **flagged**
+  only when it meets all of these conditions:
+  - the newer compiler takes at least 2× the older compiler's **median**
+    for that package over the kept runs (or at most half, for a speedup);
+  - the larger of the two is at least **1 s**, after each compiler's own
+    startup time is taken off. The startup time is the fastest of three
+    checks of an empty file. `main` runs from source through Bun, so it
+    starts slower than a release binary;
+  - it held in the **previous run too**. A change seen in a single run is
+    listed as a candidate.
+  The section also lists the slowest checks for each compiler.
+
+**Caveats:**
+- GitHub's shared runners are noisy, and their CPU model varies between
+  runs.
+- Each cell is a single sample per night, run while nothing else runs.
+- Most hub packages check in well under a second, where startup dominates.
+- The thresholds exist so that noise does not raise flags, which also
+  means small real changes go unflagged.
+- Treat a flag as a lead to reproduce locally, not as a measurement.
+
 ## Run it locally
 
 You need [Bun](https://bun.sh) and git. Linux or macOS, x64 or arm64.
@@ -112,7 +151,9 @@ Options (defaults in `crater.json`):
 | `--bend PATH` | | add a local `bend` binary as a column (repeatable) |
 | `--anon edges\|all\|none` | edges | anonymous hashes: on `main` and the latest release, on every compiler, or not at all |
 | `--jobs N` | 1 | checks at a time |
-| `--timeout S` / `--run-timeout S` | 120 / 20 | per check, per `main` run |
+| `--timeout S` / `--run-timeout S` | 600 / 20 | per check (not retried on timeout), per `main` run |
+| `--budget-min M` | 300 | stop starting checks after M minutes; the rest are marked `skip` |
+| `--no-rss` | | do not wrap checks in GNU `time` |
 | `--no-run` | | skip the run lane |
 | `--nice` / `--no-nice` | nice locally | run compilers under `nice -n 19` |
 | `--cache DIR` `--data DIR` `--page FILE` | `cache` `data` `docs/index.html` | where things go |
@@ -148,9 +189,11 @@ src/pkg.ts        import graph, entry files, dependencies
 src/compilers.ts  releases, main and local compilers
 src/run.ts        process runner with timeouts, and the verdict classifier
 src/report.ts     regressions, "broke in", history
+src/perf.ts       timing history and the slowdown/speedup flags
+src/render.ts     re-render the page from data/ without a run
 src/page.ts       the static matrix page
 crater.json       defaults
-data/             results.json and history.json, committed by CI
+data/             results.json, history.json and timings.json, committed by CI
 docs/index.html   the page, deployed to GitHub Pages by CI
 .github/workflows/crater.yml   nightly run, plus a manual trigger
 ```

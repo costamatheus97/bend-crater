@@ -5,7 +5,7 @@
 //                     [--anon edges|all|none] [--jobs N] [--timeout S]
 //                     [--run-timeout S] [--no-run] [--no-nice] [--dry]
 //                     [--cache DIR] [--data DIR] [--page FILE]
-//                     [--releases-json FILE]
+//                     [--releases-json FILE] [--no-rss] [--budget-min M]
 //
 // Defaults come from crater.json. See README.md.
 
@@ -18,12 +18,13 @@ import { renderPage } from "./page";
 import { inspect, type PkgInfo } from "./pkg";
 import {
   brokeIn, historyEntry, label, regressions,
-  type Cell, type HistoryEntry, type PkgRow, type Results, type RunOutcome,
+  type Cell, type HistoryEntry, type PkgRow, type Results, type Runner, type RunOutcome,
 } from "./report";
-import { classify, clean, exec, excerpt, isPass, type Status } from "./run";
+import { analyse, updateTimings, type Timings } from "./perf";
+import { classify, clean, exec, excerpt, isPass, rssTool, type Status } from "./run";
 import { log, readJson, ROOT, writeJson } from "./util";
 
-type Col = Compiler & { broken?: string };
+type Col = Compiler & { broken?: string; base_ms?: number };
 
 interface Config {
   hub: string;
@@ -43,6 +44,8 @@ interface Config {
   page: string;
   historyKeep: number;
   releasesJson: string | null;
+  rss: boolean;
+  budgetMin: number;
   dry: boolean;
 }
 
@@ -51,7 +54,7 @@ function config(argv: string[]): Config {
   const c: Config = {
     hub: "https://hub.bend-lang.com", releases: 6, main: true, mainRef: "main", bend: [], only: null,
     anon: "edges", jobs: 1, timeout: 120, runTimeout: 20, run: true, nice: !process.env.CI,
-    cache: "cache", data: "data", page: "docs/index.html", historyKeep: 90, releasesJson: null, dry: false, ...file,
+    cache: "cache", data: "data", page: "docs/index.html", historyKeep: 90, releasesJson: null, rss: true, budgetMin: 300, dry: false, ...file,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i], v = () => argv[++i];
@@ -66,6 +69,8 @@ function config(argv: string[]): Config {
       case "--timeout": c.timeout = parseInt(v(), 10); break;
       case "--run-timeout": c.runTimeout = parseInt(v(), 10); break;
       case "--no-run": c.run = false; break;
+      case "--no-rss": c.rss = false; break;
+      case "--budget-min": c.budgetMin = parseInt(v(), 10); break;
       case "--no-nice": c.nice = false; break;
       case "--nice": c.nice = true; break;
       case "--dry": c.dry = true; break;
@@ -77,6 +82,16 @@ function config(argv: string[]): Config {
     }
   }
   return c;
+}
+
+// runnerInfo describes the machine, since every time depends on it
+function runnerInfo(rss: boolean): Runner {
+  let cpu = os.cpus()[0]?.model ?? "?";
+  try {
+    cpu = /^model name\s*:\s*(.+)$/m.exec(fs.readFileSync("/proc/cpuinfo", "utf8"))?.[1] ?? cpu;
+  } catch { /* not Linux */ }
+  const img = process.env.ImageOS ? `${process.env.ImageOS} ${process.env.ImageVersion ?? ""}`.trim() : `${os.type()} ${os.release()}`;
+  return { ci: !!process.env.CI, cpu: cpu.trim(), nproc: os.availableParallelism(), os: img, bun: Bun.version, rss };
 }
 
 // pool runs tasks with at most n in flight
@@ -210,12 +225,22 @@ async function main(): Promise<void> {
   // cannot is marked broken rather than failing every package.
   const smoke = path.join(work, "w", "smoke.bend");
   fs.writeFileSync(smoke, "import Base\n");
+  // Its fastest of three smoke checks is its startup cost, which the
+  // timing flags take off every cell (main runs from source through Bun).
   for (const c of cols) {
-    const p = await exec([...c.cmd, smoke, "--check-only"], { cwd: work, env, timeoutMs: cfg.timeout * 1000, nice: cfg.nice });
-    if (p.code !== 0) {
-      c.broken = excerpt(clean(p.err + p.out, subs), 4) || `exit ${p.code} ${p.signal ?? ""}`;
-      log(`compiler ${c.id} failed its smoke check: ${c.broken}`);
+    for (let i = 0; i < 3 && c.broken === undefined; i++) {
+      const p = await exec([...c.cmd, smoke, "--check-only"], { cwd: work, env, timeoutMs: 120_000, nice: cfg.nice });
+      if (p.code !== 0) {
+        c.broken = excerpt(clean(p.err + p.out, subs), 4) || `exit ${p.code} ${p.signal ?? ""}`;
+        log(`compiler ${c.id} failed its smoke check: ${c.broken}`);
+      } else {
+        c.base_ms = Math.min(c.base_ms ?? Infinity, p.ms);
+      }
     }
+  }
+  const rss = cfg.rss && rssTool() !== null;
+  if (cfg.rss && !rss) {
+    log("no GNU /usr/bin/time: peak RSS is not recorded");
   }
 
   // 5. The matrix. Anonymous hashes run only on the newest release and main
@@ -240,9 +265,9 @@ async function main(): Promise<void> {
         continue;
       }
       if (c.broken !== undefined) {
-        results[r.hash][c.id] = { s: "skipped", ms: 0, x: "compiler failed its smoke check" };
+        results[r.hash][c.id] = { s: "skipped", x: "compiler failed its smoke check" };
       } else if (r.fetch !== undefined) {
-        results[r.hash][c.id] = { s: "fail-fetch", ms: 0, x: r.fetch };
+        results[r.hash][c.id] = { s: "fail-fetch", x: r.fetch };
       } else {
         tasks.push([r, c]);
       }
@@ -256,12 +281,15 @@ async function main(): Promise<void> {
   }
   log(`${tasks.length} checks on ${cols.filter((c) => !c.broken).length} compilers, ${cfg.jobs} at a time`);
   let done = 0;
+  const budgetEnd = t0 + cfg.budgetMin * 60_000;
   await pool(tasks, cfg.jobs, async ([r, c]) => {
-    const cell = await checkOne(r, c);
+    const cell = Date.now() > budgetEnd
+      ? { s: "skipped" as const, x: `not run: the run passed its ${cfg.budgetMin} min budget` }
+      : await checkOne(r, c);
     results[r.hash][c.id] = cell;
     done++;
     if (done % 25 === 0 || !isPass(cell.s)) {
-      log(`[${done}/${tasks.length}] ${label(r)} on ${c.id}: ${cell.s} (${cell.ms} ms)`);
+      log(`[${done}/${tasks.length}] ${label(r)} on ${c.id}: ${cell.s} (${cell.check_ms ?? "-"} ms)`);
     }
   });
   fake.stop(true);
@@ -290,12 +318,12 @@ async function main(): Promise<void> {
 
   async function checkOne(r: PkgRow, c: Col): Promise<Cell> {
     if (r.roots.length === 0) {
-      return { s: "fail-parse", ms: 0, x: "the package has no .bend file" };
+      return { s: "fail-parse", x: "the package has no .bend file" };
     }
     const wrapper = path.join(work, "w", r.hash + ".bend");
     let cell: Cell | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const p = await exec([...c.cmd, wrapper, "--check-only"], { cwd: work, env, timeoutMs: cfg.timeout * 1000, nice: cfg.nice });
+      const p = await exec([...c.cmd, wrapper, "--check-only"], { cwd: work, env, timeoutMs: cfg.timeout * 1000, nice: cfg.nice, rss });
       const text = clean(p.err + "\n" + p.out, subs);
       let s: Status = classify(p, text);
       // bend asks the hub again when a path under a stored package does not
@@ -306,8 +334,13 @@ async function main(): Promise<void> {
       if (s === "fail-fetch" && asked !== null && store.has(asked[1])) {
         s = "fail-parse";
       }
-      cell = { s, ms: p.ms, ...(isPass(s) ? {} : { x: s === "timeout" ? `no verdict in ${cfg.timeout} s` : where(r, text) + excerpt(text) }) };
-      if (s !== "timeout" && s !== "crash" && s !== "fail-fetch") {
+      cell = {
+        s, check_ms: p.ms, ...(p.rssKb !== undefined ? { rss_kb: p.rssKb } : {}),
+        ...(isPass(s) ? {} : { x: s === "timeout" ? `no verdict in ${cfg.timeout} s` : where(r, text) + excerpt(text) }),
+      };
+      // a crash or a fetch failure is retried once; a timeout is not, since
+      // at the cap one slow package would cost the run an hour
+      if (s !== "crash" && s !== "fail-fetch") {
         break;
       }
     }
@@ -354,8 +387,13 @@ async function main(): Promise<void> {
     hub: { url: cfg.hub, total: listed.length, named, checked: rows.length },
     compilers: cols.map(({ cmd: _cmd, ...c }) => c),
     packages: rows, results, regressions: [], brokeIn: {},
+    runner: runnerInfo(rss), timeoutS: cfg.timeout,
   };
   res.brokeIn = brokeIn(res);
+  const timingsFile = path.join(dataDir, "timings.json");
+  const tm = updateTimings(readJson<Timings | null>(timingsFile, null), res.finished, results);
+  writeJson(timingsFile, tm);
+  res.perf = analyse(res.compilers, rows, results, tm, label);
   res.regressions = regressions(res, prev !== null && prev.schema === 1 ? prev : null);
   writeJson(resultsFile, res);
   const histFile = path.join(dataDir, "history.json");
@@ -367,6 +405,9 @@ async function main(): Promise<void> {
   fs.writeFileSync(page, renderPage(res, hist.slice(-cfg.historyKeep)));
   log(`wrote ${path.relative(ROOT, resultsFile)}, ${path.relative(ROOT, histFile)}, ${path.relative(ROOT, page)} in ${res.seconds} s`);
   log(`${res.regressions.length} regressions`);
+  const flagged = res.perf.pairs.flatMap((p) => [...p.slowdowns, ...p.speedups]).filter((x) => x.flagged);
+  log(`timing: ${flagged.length} flagged changes; slowest: ` + Object.entries(res.perf.slowest)
+    .map(([c, xs]) => `${c} ${xs[0]?.pkg ?? "-"} ${xs[0]?.ms ?? 0} ms`).join(", "));
 }
 
 main().catch((e) => {
