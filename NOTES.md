@@ -72,6 +72,11 @@ read the README instead.
   The GitHub token is used in one step, which only lists releases into
   `cache/releases.json`.
 - Commit and Pages run in separate jobs with their own permissions.
+- The run lane executes hub code, so the crater job's artifact contains
+  exactly `data/results.json`, `data/history.json` and `docs/index.html`,
+  and the publish job refuses any other change.
+- The restored hub store is re-hashed on every start (about 0.3 s), and any
+  package that no longer matches is refetched.
 - Cache keys:
   - the hub store: `hub-lib-<run_id>`, restored by prefix, so it
     accumulates;
