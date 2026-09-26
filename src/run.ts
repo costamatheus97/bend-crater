@@ -1,0 +1,91 @@
+// Running one compiler on one file under a timeout, and reading the verdict.
+
+import { spawn } from "node:child_process";
+
+export type Status =
+  | "pass" | "pass-unsafe"
+  | "fail-parse" | "fail-check" | "fail-fetch"
+  | "timeout" | "crash" | "skipped";
+
+export interface Proc {
+  code: number | null;
+  signal: string | null;
+  out: string;
+  err: string;
+  ms: number;
+  timedOut: boolean;
+}
+
+const CAP = 64 * 1024;
+
+// exec runs argv in its own process group and kills the whole group when
+// the timeout passes, so a compiler's workers go with it.
+export function exec(argv: string[], opts: { cwd: string; env: Record<string, string>; timeoutMs: number; nice: boolean }): Promise<Proc> {
+  const full = opts.nice ? ["nice", "-n", "19", ...argv] : argv;
+  const t0 = performance.now();
+  return new Promise((resolve) => {
+    const ch = spawn(full[0], full.slice(1), { cwd: opts.cwd, env: opts.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "", timedOut = false;
+    ch.stdout.on("data", (d: Buffer) => { if (out.length < CAP) out += d.toString("utf8"); });
+    ch.stderr.on("data", (d: Buffer) => { if (err.length < CAP) err += d.toString("utf8"); });
+    const kill = () => {
+      try { process.kill(-(ch.pid as number), "SIGKILL"); } catch { /* gone */ }
+    };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, opts.timeoutMs);
+    ch.on("error", (e) => { err += String(e); });
+    ch.on("close", (code, signal) => {
+      clearTimeout(timer);
+      kill();
+      resolve({ code, signal, out, err, ms: Math.round(performance.now() - t0), timedOut });
+    });
+  });
+}
+
+// eslint-disable-next-line no-control-regex
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
+export function clean(s: string, subs: [string, string][]): string {
+  let t = s.replace(ANSI, "").replace(/\r/g, "");
+  for (const [from, to] of subs) {
+    t = t.split(from).join(to);
+  }
+  return t;
+}
+
+// excerpt keeps the first lines of the error block, trimmed, so the stored
+// results stay small.
+export function excerpt(text: string, lines = 8, width = 160): string {
+  const all = text.split("\n");
+  const at = all.findIndex((l) => l.startsWith("Error"));
+  const from = at < 0 ? all.filter((l) => l.trim() !== "") : all.slice(at);
+  return from.slice(0, lines).map((l) => (l.length > width ? l.slice(0, width - 1) + "…" : l)).join("\n").trimEnd();
+}
+
+// classify reads bend's verdict. A clean check prints "All terms check."; a
+// check that leans on @unsafe or foreign defs prints "All terms check, but N
+// defs rely on unsafe or foreign code" (older releases: "with N unsafe
+// annotations"). Both exit 0. Errors print an "Error:" block on stderr; a
+// parse or load error has a Location with no def and no Context, while a
+// check error names the def it is in.
+export function classify(p: Proc, text: string): Status {
+  if (p.timedOut) {
+    return "timeout";
+  }
+  if (p.code === 0) {
+    return /unsafe or foreign|unsafe annotation/.test(text) ? "pass-unsafe" : "pass";
+  }
+  if (p.signal !== null || !/^Error/m.test(text) || /stack overflowed/.test(text)) {
+    return "crash";
+  }
+  if (/a file at \S+ hashing to|a package named \S+ on |no such file: \$LIB\//.test(text)) {
+    return "fail-fetch";
+  }
+  const loc = /^Location:(.*)$/m.exec(text);
+  if (loc !== null && loc[1].trim() === "" && !/^Context:/m.test(text)) {
+    return "fail-parse";
+  }
+  return "fail-check";
+}
+
+export const isPass = (s: string | undefined) => s === "pass" || s === "pass-unsafe";
+export const isFail = (s: string | undefined) => s !== undefined && !isPass(s) && s !== "skipped";

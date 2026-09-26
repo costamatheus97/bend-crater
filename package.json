@@ -1,0 +1,15 @@
+{
+  "name": "bend-crater",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "crater": "bun src/crater.ts",
+    "check": "bunx tsc --noEmit -p .",
+    "test": "bun test ./test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}

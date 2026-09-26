@@ -1,0 +1,15 @@
+{
+  "hub": "https://hub.bend-lang.com",
+  "releases": 6,
+  "main": true,
+  "mainRef": "main",
+  "anon": "edges",
+  "jobs": 1,
+  "timeout": 120,
+  "runTimeout": 20,
+  "run": true,
+  "cache": "cache",
+  "data": "data",
+  "page": "docs/index.html",
+  "historyKeep": 90
+}

@@ -1,0 +1,137 @@
+name: crater
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      releases:
+        description: "How many recent releases to check"
+        default: "6"
+      anon:
+        description: "Anonymous hashes: edges (main and latest), all, or none"
+        default: "edges"
+
+permissions: {}
+
+concurrency:
+  group: crater
+  cancel-in-progress: false
+
+jobs:
+  # Checks the hub. This job runs hub code (the checks, and a package's main
+  # in the run lane), so it holds no write token: checkout keeps no
+  # credentials, and the only token it sees is read-only and in one step.
+  crater:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: List Bend releases
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES: ${{ inputs.releases || '6' }}
+        run: |
+          mkdir -p cache
+          gh api "repos/bendlang/bend/releases?per_page=100" > cache/releases.json
+          key=$(jq -r --argjson n "$RELEASES" '[.[] | select(.draft|not) | select(.prerelease|not) | .tag_name | select(test("^v2\\.[0-9]+\\.[0-9]+$"))] | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | reverse | .[:$n] | join(",")' cache/releases.json)
+          echo "releases: $key"
+          echo "key=$(echo "$key" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the hub store
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/lib
+          key: hub-lib-${{ github.run_id }}
+          restore-keys: hub-lib-
+
+      - name: Restore the release binaries
+        id: relcache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/releases
+          key: releases-${{ runner.os }}-${{ steps.rel.outputs.key }}
+          restore-keys: releases-${{ runner.os }}-
+
+      - name: Run the crater
+        run: >
+          bun src/crater.ts --jobs 2 --no-nice
+          --releases "${{ inputs.releases || '6' }}"
+          --anon "${{ inputs.anon || 'edges' }}"
+          --releases-json cache/releases.json
+
+      - name: Save the hub store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cache/lib
+          key: hub-lib-${{ github.run_id }}
+
+      - name: Save the release binaries
+        if: always() && steps.relcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/releases
+          key: releases-${{ runner.os }}-${{ steps.rel.outputs.key }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crater-out
+          path: |
+            data/
+            docs/
+          retention-days: 7
+
+  # Commits the results and page, and hands the page to Pages.
+  publish:
+    needs: crater
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: crater-out
+          path: .
+
+      - name: Commit results
+        run: |
+          git config user.name "Matheus Costa"
+          git config user.email "54296807+costamatheus97@users.noreply.github.com"
+          git add data docs
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -q -m "Crater run $(date -u +%Y-%m-%d)"
+            for i in 1 2 3; do
+              git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break
+              sleep 5
+            done
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
