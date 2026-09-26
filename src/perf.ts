@@ -20,6 +20,11 @@ import { isPass } from "./run";
 
 export const RATIO = 2;
 export const FLOOR_MS = 1000;
+// the list shows the biggest movers even below the flag thresholds, from
+// this size and this ratio up, marked as below threshold
+export const SHOW_MS = 200;
+export const SHOW_RATIO = 1.2;
+const TOP = 5;
 export const KEEP = 14;
 
 // Timings keeps, per package hash and compiler id, check_ms for each of the
@@ -37,7 +42,8 @@ export interface PerfRow {
   newMs: number;      // newer compiler, this run, startup taken off
   oldMs: number;      // older compiler's median, startup taken off
   ratio: number;
-  flagged: boolean;   // held in the previous run too
+  level: "flagged" | "candidate" | "below";
+  flagged: boolean;   // level === "flagged"
 }
 
 export interface PerfPair {
@@ -51,6 +57,7 @@ export interface PerfPair {
 export interface Perf {
   ratio: number;
   floorMs: number;
+  showMs: number;
   runsKept: number;
   pairs: PerfPair[];
   slowest: Record<string, { hash: string; pkg: string; ms: number; rss_kb?: number }[]>;
@@ -122,24 +129,25 @@ export function analyse(cols: ColInfo[], pkgs: PkgRow[], results: Record<string,
       compared++;
       const newMs = adj(nv, nc);
       const oldMs = adj(median(hist), oc);
-      if (Math.max(newMs, oldMs) < FLOOR_MS) {
+      const big = Math.max(newMs, oldMs);
+      const ratio = (newMs + 50) / (oldMs + 50);
+      if (big < SHOW_MS || (ratio < SHOW_RATIO && ratio > 1 / SHOW_RATIO)) {
         continue;
       }
-      const ratio = (newMs + 50) / (oldMs + 50);
       const series = tm.t[p.hash]?.[nc.id] ?? [];
       const before = series.length >= 2 ? series[series.length - 2] : null;
       const beforeRatio = before === null ? null : (adj(before, nc) + 50) / (oldMs + 50);
-      const row = (flagged: boolean): PerfRow =>
-        ({ hash: p.hash, pkg: label(p), newer: nc.id, older: oc.id, newMs, oldMs: Math.round(oldMs), ratio: Math.round(ratio * 100) / 100, flagged });
-      if (ratio >= RATIO) {
-        slow.push(row(beforeRatio !== null && beforeRatio >= RATIO));
-      } else if (ratio <= 1 / RATIO) {
-        fast.push(row(beforeRatio !== null && beforeRatio <= 1 / RATIO));
-      }
+      const slower = ratio > 1;
+      const over = big >= FLOOR_MS && (slower ? ratio >= RATIO : ratio <= 1 / RATIO);
+      const again = beforeRatio !== null && (slower ? beforeRatio >= RATIO : beforeRatio <= 1 / RATIO);
+      const level: PerfRow["level"] = !over ? "below" : again ? "flagged" : "candidate";
+      const row: PerfRow = { hash: p.hash, pkg: label(p), newer: nc.id, older: oc.id, newMs, oldMs: Math.round(oldMs),
+        ratio: Math.round(ratio * 100) / 100, level, flagged: level === "flagged" };
+      (slower ? slow : fast).push(row);
     }
     slow.sort((a, b) => b.ratio - a.ratio);
     fast.sort((a, b) => a.ratio - b.ratio);
-    return { newer: nc.id, older: oc.id, slowdowns: slow.slice(0, 10), speedups: fast.slice(0, 10), compared };
+    return { newer: nc.id, older: oc.id, slowdowns: slow.slice(0, TOP), speedups: fast.slice(0, TOP), compared };
   });
   const slowest: Perf["slowest"] = {};
   for (const c of ok) {
@@ -150,5 +158,5 @@ export function analyse(cols: ColInfo[], pkgs: PkgRow[], results: Record<string,
       .slice(0, 5)
       .map(({ p, cell }) => ({ hash: p.hash, pkg: label(p), ms: cell?.check_ms ?? 0, ...(cell?.rss_kb ? { rss_kb: cell.rss_kb } : {}) }));
   }
-  return { ratio: RATIO, floorMs: FLOOR_MS, runsKept: tm.runs.length, pairs: out, slowest };
+  return { ratio: RATIO, floorMs: FLOOR_MS, showMs: SHOW_MS, runsKept: tm.runs.length, pairs: out, slowest };
 }

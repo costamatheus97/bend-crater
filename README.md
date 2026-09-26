@@ -120,7 +120,9 @@ records how long its check took.
     listed as a candidate.
   - both checks **passed**. A failing check stops at its first error, so its
     time is not comparable.
-  The section also lists the slowest checks for each compiler.
+  The section also lists, for each pair, the biggest movers below those
+  thresholds (from 0.2 s after startup and 1.2×), marked "below threshold"
+  for context, and the slowest passing checks for each compiler.
 
 **Caveats:**
 - GitHub's shared runners are noisy, and their CPU model varies between

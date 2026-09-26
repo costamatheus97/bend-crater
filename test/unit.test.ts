@@ -76,13 +76,13 @@ test("timing: only large, repeated changes above the floor are flagged", async (
   // run 1: a is 3x slower on main (candidate), b is tiny, c is 2x faster
   let tm = updateTimings(null, "r1", run(15300, 1200, 1300));
   let perf = analyse(cols, pkgs, run(15300, 1200, 1300), tm, lab);
-  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.flagged])).toEqual([["a", false]]);
-  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.flagged])).toEqual([["c", false]]);
+  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.level])).toEqual([["a", "candidate"], ["b", "below"]]);
+  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.level])).toEqual([["c", "candidate"]]);
   // run 2: the same again, so both are flagged
   tm = updateTimings(tm, "r2", run(15300, 1200, 1300));
   perf = analyse(cols, pkgs, run(15300, 1200, 1300), tm, lab);
-  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.flagged])).toEqual([["a", true]]);
-  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.flagged])).toEqual([["c", true]]);
+  expect(perf.pairs[0].slowdowns.map((x) => [x.pkg, x.level])).toEqual([["a", "flagged"], ["b", "below"]]);
+  expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.level])).toEqual([["c", "flagged"]]);
   expect(tm.t.a.main).toEqual([15300, 15300]);
   expect(perf.slowest.main[0]).toEqual({ hash: "a", pkg: "a", ms: 15300 });
 });

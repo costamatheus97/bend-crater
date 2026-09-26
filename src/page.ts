@@ -228,7 +228,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   if (!P) { perf.appendChild(el("div", { cls: "muted", text: "No timing data in this run." })); }
   else {
     var rn = R.runner || {};
-    perf.appendChild(el("div", { cls: "muted", text: "Each cell is one --check-only run, timed once per night on " + (rn.ci ? "a shared GitHub runner" : "a local machine") + (rn.cpu ? " (" + rn.cpu + ", " + rn.nproc + " threads, " + rn.os + ")" : "") + ". A change is flagged only when the newer compiler takes at least " + P.ratio + "× the older one's median for that package over the last " + P.runsKept + " run(s), the larger side is at least " + (P.floorMs / 1000) + " s after each compiler's startup (" + R.compilers.filter(function (c) { return c.base_ms != null; }).map(function (c) { return colName(c) + " " + c.base_ms + " ms"; }).join(", ") + ") is taken off, and the same held in the previous run. One-run changes are listed as candidates." }));
+    perf.appendChild(el("div", { cls: "muted", text: "Each cell is one --check-only run, timed once per night on " + (rn.ci ? "a shared GitHub runner" : "a local machine") + (rn.cpu ? " (" + rn.cpu + ", " + rn.nproc + " threads, " + rn.os + ")" : "") + ". A change is flagged only when the newer compiler takes at least " + P.ratio + "× the older one's median for that package over the last " + P.runsKept + " run(s), the larger side is at least " + (P.floorMs / 1000) + " s after each compiler's startup (" + R.compilers.filter(function (c) { return c.base_ms != null; }).map(function (c) { return colName(c) + " " + c.base_ms + " ms"; }).join(", ") + ") is taken off, and the same held in the previous run. One-run changes are listed as candidates. The biggest movers below the thresholds (from " + ((P.showMs || 200) / 1000) + " s after startup) are listed for context and flag nothing." }));
     var flagged = [], any = false;
     P.pairs.forEach(function (pr) {
       var rowsP = pr.slowdowns.map(function (x) { return [x, "slower"]; }).concat(pr.speedups.map(function (x) { return [x, "faster"]; }));
@@ -241,13 +241,14 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
         if (x.flagged) flagged.push(x);
         var tr = el("tr");
         tr.appendChild(el("td", { cls: "mono", text: x.pkg }));
-        tr.appendChild(el("td", { cls: x.flagged ? "flag" : "", text: (xr[1] === "slower" ? x.ratio + "× slower" : (1 / x.ratio).toFixed(1) + "× faster") + (x.flagged ? " (flagged)" : " (candidate)") }));
+        var lvl = x.level || (x.flagged ? "flagged" : "candidate");
+        tr.appendChild(el("td", { cls: lvl === "flagged" ? "flag" : lvl === "below" ? "muted" : "", text: (xr[1] === "slower" ? x.ratio.toFixed(1) + "× slower" : (1 / x.ratio).toFixed(1) + "× faster") + " (" + (lvl === "below" ? "below threshold" : lvl) + ")" }));
         tr.appendChild(el("td", { cls: "muted", text: (x.oldMs / 1000).toFixed(1) + " s → " + (x.newMs / 1000).toFixed(1) + " s" }));
         t.appendChild(tr);
       });
       perf.appendChild(t);
     });
-    if (!any) perf.appendChild(el("div", { style: "margin-top:8px", text: "No slowdowns or speedups over the threshold between main and " + (P.pairs[0] ? P.pairs[0].older : "the latest release") + ", or between consecutive releases (" + (P.pairs[0] ? P.pairs[0].compared : 0) + " packages compared on main)." }));
+    if (!any) perf.appendChild(el("div", { style: "margin-top:8px", text: "No check moved by 1.2× or more between main and " + (P.pairs[0] ? P.pairs[0].older : "the latest release") + ", or between consecutive releases (" + (P.pairs[0] ? P.pairs[0].compared : 0) + " packages compared on main)." }));
     perf.appendChild(el("div", { style: "margin-top:12px" }, [el("b", { text: "Slowest passing checks per compiler" })]));
     var st = el("table");
     R.compilers.forEach(function (c) {
