@@ -85,9 +85,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: crater-out
+          # exactly the three outputs: the run lane executes hub code, which
+          # must not be able to add files that the publish job commits or serves
           path: |
-            data/
-            docs/
+            data/results.json
+            data/history.json
+            docs/index.html
           retention-days: 7
 
   # Commits the results and page, and hands the page to Pages.
@@ -106,17 +109,21 @@ jobs:
 
       - name: Commit results
         run: |
+          git status --short
+          test -z "$(git status --porcelain --untracked-files=all | grep -vE '^( M|\?\?) (data/results.json|data/history.json|docs/index.html)$')" || { echo "unexpected files in the artifact"; exit 1; }
           git config user.name "Matheus Costa"
           git config user.email "54296807+costamatheus97@users.noreply.github.com"
-          git add data docs
+          git add data/results.json data/history.json docs/index.html
           if git diff --cached --quiet; then
             echo "no changes"
           else
             git commit -q -m "Crater run $(date -u +%Y-%m-%d)"
+            ok=0
             for i in 1 2 3; do
-              git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && break
+              git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && { ok=1; break; }
               sleep 5
             done
+            test "$ok" = 1
           fi
 
       - uses: actions/upload-pages-artifact@v3

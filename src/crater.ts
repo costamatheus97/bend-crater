@@ -98,6 +98,11 @@ async function main(): Promise<void> {
   const dataDir = path.resolve(ROOT, cfg.data);
   const store = new Store(path.join(cache, "lib"), cfg.hub);
 
+  const dropped = store.verify();
+  if (dropped > 0) {
+    log(`${dropped} stored packages no longer matched their hash and will be refetched`);
+  }
+
   // 1. The hub's packages, and what the names point at.
   log("listing hub packages");
   const listed = await listPackages(cfg.hub);

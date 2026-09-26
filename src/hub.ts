@@ -75,6 +75,30 @@ export class Store {
     return fs.existsSync(path.join(this.lib, hash));
   }
 
+  // verify re-hashes every stored package the way --publish hashes it (the
+  // sorted "<sha256> <path>" lines, then the first 32 hex digits of their
+  // sha256) and drops any that no longer match, so a store restored from a
+  // cache that code under test could have touched is refetched, not trusted.
+  verify(): number {
+    let bad = 0;
+    for (const h of fs.readdirSync(this.lib)) {
+      const dir = path.join(this.lib, h);
+      if (h.startsWith(".tmp-")) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        continue;
+      }
+      if (!HASH.test(h)) {
+        continue;
+      }
+      const man = this.files(h).map((p) => sha256(this.read(h, p)) + " " + p + "\n").join("");
+      if (!sha256(man).startsWith(h.slice(2))) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        bad++;
+      }
+    }
+    return bad;
+  }
+
   // ensure puts a package in the store, fetching it once; it answers null on
   // success, or why the package could not be fetched.
   async ensure(hash: string): Promise<string | null> {
