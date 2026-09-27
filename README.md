@@ -206,7 +206,7 @@ Options (defaults in `crater.json`):
 The cache (`cache/`) holds the hub store (about 20 MB), the unpacked
 releases (about 45 MB each) and the `main` clone. A first run fetches the
 whole hub once, which takes a while because the fetches run one at a time.
-Later runs fetch only new packages. The checks themselves take a few minutes.
+Later runs fetch only new packages. The checks themselves take about 25 minutes on a GitHub runner, about half of it for the lane diff.
 
 ## Limits
 

@@ -165,7 +165,11 @@ read the README instead.
   from its start), and a started cell ends within `cellTimeout` (15 min),
   so the crater is done by about 315 min. The step's `timeout-minutes` is
   325 and the job's is 340, which leaves time to finalize, save the caches
-  and upload. A normal run of 992 cells takes 15 to 20 min.
+  and upload. The run of 2026-09-27 12:30 UTC (run 36319206708) checked
+  1012 cells in 1491 s (25 min). About 11 to 12 min of that is the lane
+  diff: 22 runnable programs on two compilers, at 12 to 15 s each for the
+  two emits, clang -O3 and the runs. That is estimated from the log's gaps,
+  since builds are not timed separately.
 - A `workflow_dispatch` with `only` set is a test run: it runs the checks
   and uploads the artifact, and publishes nothing.
 - Cache keys:
