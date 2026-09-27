@@ -11,6 +11,9 @@ on:
       anon:
         description: "Anonymous hashes: edges (main and latest), all, or none"
         default: "edges"
+      only:
+        description: "Only packages matching this regex (a test run: nothing is published)"
+        default: ""
 
 permissions: {}
 
@@ -65,12 +68,42 @@ jobs:
           key: releases-${{ runner.os }}-${{ steps.rel.outputs.key }}
           restore-keys: releases-${{ runner.os }}-
 
+      # The crater stops starting checks after --budget-min (300 min, from
+      # crater.json), and a started cell takes at most --cell-timeout
+      # (15 min), so it finishes by about 315 min. The step's own timeout
+      # (325) stops it before the job's (340), so the steps after it still
+      # run. scoped.sh caps the whole step's memory at 85% of the runner's,
+      # a backstop behind the 4 GB per-cell watchdog: a runner that runs out
+      # of memory is shut down, which skips even the always() steps.
       - name: Run the crater
+        id: crater
+        timeout-minutes: 325
+        env:
+          RELEASES: ${{ inputs.releases || '6' }}
+          ANON: ${{ inputs.anon || 'edges' }}
+          ONLY: ${{ inputs.only || '' }}
         run: >
-          bun src/crater.ts --jobs 1 --no-nice
-          --releases "${{ inputs.releases || '6' }}"
-          --anon "${{ inputs.anon || 'edges' }}"
+          scripts/scoped.sh "$(command -v bun)" src/crater.ts --jobs 1 --no-nice
+          --releases "$RELEASES" --anon "$ANON" ${ONLY:+--only "$ONLY"}
           --releases-json cache/releases.json
+
+      # A crater that was killed outright (not stopped) left a checkpoint
+      # and no outputs: write them from it, as a partial run.
+      - name: Finish a run that did not
+        if: failure() || cancelled()
+        env:
+          OUTCOME: ${{ steps.crater.outcome }}
+        run: bun src/finalize.ts --reason "the crater step ended early ($OUTCOME)"
+
+      - name: Check for outputs
+        id: out
+        if: always()
+        run: |
+          if jq -e '.finalized == true' cache/checkpoint.json >/dev/null 2>&1; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "this run wrote no outputs"
+          fi
 
       - name: Save the hub store
         if: always()
@@ -87,6 +120,7 @@ jobs:
           key: releases-${{ runner.os }}-${{ steps.rel.outputs.key }}
 
       - uses: actions/upload-artifact@v7
+        if: always() && steps.out.outputs.ready == 'true'
         with:
           name: crater-out
           # exactly the four outputs: the run lane executes hub code, which
@@ -98,33 +132,59 @@ jobs:
             docs/index.html
           retention-days: 7
 
-  # Commits the results and page, and hands the page to Pages.
+  # Commits the results and page, and hands the page to Pages. It also runs
+  # when the crater job failed or was cancelled partway, since that job
+  # still uploads a partial run; it publishes only outputs that validate
+  # and are newer than the committed ones. A test run (the `only` input)
+  # publishes nothing.
   publish:
     needs: crater
+    if: always() && needs.crater.result != 'skipped' && !inputs.only
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
     steps:
       - uses: actions/checkout@v7
 
+      - uses: oven-sh/setup-bun@v2
+
       - uses: actions/download-artifact@v8
+        id: dl
+        continue-on-error: true
         with:
           name: crater-out
           path: .
 
-      - name: Commit results
+      # The artifact comes from the job that ran hub code: it is data, and
+      # this job's own code checks it. The page is rendered again here
+      # from the checked data, so the served HTML never comes from there.
+      - name: Check the outputs
+        id: check
+        if: steps.dl.outcome == 'success'
         run: |
           git status --short
           test -z "$(git status --porcelain --untracked-files=all | grep -vE '^( M|\?\?) (data/results.json|data/history.json|data/timings.json|docs/index.html)$')" || { echo "unexpected files in the artifact"; exit 1; }
+          git show HEAD:data/results.json > "$RUNNER_TEMP/committed.json" 2>/dev/null || : > "$RUNNER_TEMP/committed.json"
+          bun src/validate.ts --committed "$RUNNER_TEMP/committed.json"
+          bun src/render.ts
+          jq -r 'if .partial then "partial run: \(.partial.done) of \(.partial.total) cells (\(.partial.reason))" else "full run" end' data/results.json
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit results
+        if: steps.check.outputs.ok == 'true'
+        run: |
           git config user.name "Matheus Costa"
           git config user.email "54296807+costamatheus97@users.noreply.github.com"
           git add data/results.json data/history.json data/timings.json docs/index.html
           if git diff --cached --quiet; then
             echo "no changes"
           else
-            git commit -q -m "Crater run $(date -u +%Y-%m-%d)"
+            part=$(jq -r 'if .partial then " (partial)" else "" end' data/results.json)
+            git commit -q -m "Crater run $(date -u +%Y-%m-%d)$part"
             ok=0
-            for i in 1 2 3; do
+            for _ in 1 2 3; do
               git pull -q --rebase origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && { ok=1; break; }
               sleep 5
             done
@@ -132,11 +192,14 @@ jobs:
           fi
 
       - uses: actions/upload-pages-artifact@v5
+        if: steps.check.outputs.ok == 'true'
         with:
           path: docs
 
   deploy:
     needs: publish
+    # without always(), a failed crater job further up skips this
+    if: always() && needs.publish.result == 'success' && needs.publish.outputs.ok == 'true'
     runs-on: ubuntu-24.04
     permissions:
       pages: write

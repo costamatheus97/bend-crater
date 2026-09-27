@@ -78,6 +78,13 @@ before filing anything upstream.
    - `data/timings.json`: check times for the last 14 runs;
    - `docs/index.html`: the page.
 
+   While the checks run, the run keeps a checkpoint (`cache/checkpoint.json`).
+   A run that is stopped (cancelled, or at a timeout), that runs out of
+   budget, or whose harness fails still writes these files from its
+   checkpoint, as a **partial run**: its cells not run are `skip`, with the
+   reason, and the page says so at the top. If the process is killed
+   outright, `bun src/finalize.ts` writes them from the checkpoint it left.
+
 Anonymous hashes (published without a name) are checked on `main` and the
 latest release only, to keep the run short. `--anon all` checks them on
 every compiler.
@@ -206,10 +213,14 @@ src/pkg.ts        import graph, entry files, dependencies
 src/compilers.ts  releases, main and local compilers
 src/run.ts        process runner with timeouts, and the verdict classifier
 src/report.ts     regressions, "broke in", history
+src/watch.ts      the memory watchdog on each cell's processes
+src/finalize.ts   the checkpoint, and writing the outputs from it (also for a killed run)
+src/validate.ts   the publish job's checks on a run's outputs
 src/perf.ts       timing history and the slowdown/speedup flags
 src/render.ts     re-render the page from data/ without a run
 src/page.ts       the static matrix page
 crater.json       defaults
+scripts/scoped.sh CI: runs the crater in a memory-capped systemd scope
 data/             results.json, history.json and timings.json, committed by CI
 docs/index.html   the page, deployed to GitHub Pages by CI
 .github/workflows/crater.yml   nightly run, plus a manual trigger

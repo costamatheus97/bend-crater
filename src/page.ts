@@ -66,6 +66,8 @@ h2 { font-size: 17px; margin: 32px 0 10px; }
 .card .v { font-size: 12px; color: var(--mut); }
 .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 8px; background: var(--skip); }
 .bar span { display: block; height: 100%; }
+.partial { margin-top: 14px; background: var(--timeout); color: var(--timeout-fg); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 14px; }
+.partial[hidden] { display: none; }
 .reg { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 12px 14px; }
 .reg ul { margin: 6px 0 0; padding-left: 18px; }
 .reg li { margin: 6px 0; }
@@ -128,6 +130,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   <button class="theme" id="theme" type="button" aria-label="Toggle dark mode">theme</button>
 </div>
 <div class="meta" id="meta"></div>
+<div class="partial" id="partial" role="status" hidden></div>
 <div class="cards" id="cards"></div>
 
 <h2>Regressions</h2>
@@ -193,6 +196,13 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   [["Last run", when(R.finished) + " (" + ago(R.finished) + ")"], ["Took", R.seconds < 120 ? R.seconds + " s" : Math.round(R.seconds / 60) + " min"],
    ["Hub", R.hub.total + " packages, " + R.hub.named + " named versions"], ["Checked", R.hub.checked + " packages"]]
     .forEach(function (kv) { meta.appendChild(el("span", {}, [kv[0] + ": ", el("b", { text: kv[1] })])); });
+
+  if (R.partial) {
+    var pt = document.getElementById("partial");
+    pt.hidden = false;
+    pt.appendChild(el("b", { text: "Partial run: " }));
+    pt.appendChild(document.createTextNode(R.partial.done + " of " + R.partial.total + " checks ran: " + R.partial.reason + ". The rest show as skip, and the regressions and timings cover only the checks that ran."));
+  }
 
   var cards = document.getElementById("cards");
   R.compilers.forEach(function (c) {

@@ -15,16 +15,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ensureMain, ensureRelease, listReleases, localCompiler, pruneReleases, type Compiler } from "./compilers";
 import { listPackages, Store, type HubPackage } from "./hub";
-import { renderPage } from "./page";
+import { checkpointFile, finalize, writeCheckpoint, type Checkpoint } from "./finalize";
 import { inspect, type PkgInfo } from "./pkg";
-import {
-  brokeIn, historyEntry, label, regressions,
-  type Cell, type HistoryEntry, type PkgRow, type Results, type Runner, type RunOutcome,
-} from "./report";
-import { analyse, updateTimings, type Timings } from "./perf";
-import { classify, clean, exec, excerpt, isPass, peakKb, rssTool, type ExecOpts, type Proc, type Status } from "./run";
+import { label, type Cell, type PkgRow, type Runner, type RunOutcome } from "./report";
+import { classify, clean, exec, excerpt, isPass, peakKb, rssTool, stopAll, type ExecOpts, type Proc, type Status } from "./run";
 import { available as watchdog, memTotalKb, setTotalCap } from "./watch";
-import { log, readJson, ROOT, writeJson } from "./util";
+import { log, readJson, ROOT } from "./util";
 
 type Col = Compiler & { broken?: string; base_ms?: number };
 
@@ -101,15 +97,36 @@ function runnerInfo(rss: boolean): Runner {
   return { ci: !!process.env.CI, cpu: cpu.trim(), nproc: os.availableParallelism(), os: img, bun: Bun.version, rss };
 }
 
-// pool runs tasks with at most n in flight
-async function pool<T>(items: T[], n: number, fn: (x: T, i: number) => Promise<void>): Promise<void> {
+// pool runs tasks with at most n in flight, and starts none once stop()
+async function pool<T>(items: T[], n: number, stop: () => boolean, fn: (x: T, i: number) => Promise<void>): Promise<void> {
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
-    while (next < items.length) {
+    while (next < items.length && !stop()) {
       const i = next++;
       await fn(items[i], i);
     }
   }));
+}
+
+// the run's checkpoint once the checks start, so a harness error can still
+// finalize what ran
+let active: { cp: Checkpoint; file: string } | null = null;
+
+function finish(reason: string | null): void {
+  if (active === null || active.cp.finalized) {
+    return;
+  }
+  const { cp, file } = active;
+  const res = finalize(cp, reason);
+  cp.finalized = true;
+  cp.draft.results = {};
+  writeCheckpoint(file, cp);
+  log(`wrote ${path.relative(ROOT, path.join(cp.out.data, "results.json"))}, history.json, timings.json and ${path.relative(ROOT, cp.out.page)} in ${res.seconds} s`
+    + (res.partial ? ` (partial: ${res.partial.done} of ${res.partial.total} cells; ${res.partial.reason})` : ""));
+  log(`${res.regressions.length} regressions`);
+  const flagged = (res.perf?.pairs ?? []).flatMap((p) => [...p.slowdowns, ...p.speedups]).filter((x) => x.flagged);
+  log(`timing: ${flagged.length} flagged changes; slowest: ` + Object.entries(res.perf?.slowest ?? {})
+    .map(([c, xs]) => `${c} ${xs[0]?.pkg ?? "-"} ${xs[0]?.ms ?? 0} ms`).join(", "));
 }
 
 async function main(): Promise<void> {
@@ -118,6 +135,8 @@ async function main(): Promise<void> {
   const started = new Date().toISOString();
   const cache = path.resolve(ROOT, cfg.cache);
   const dataDir = path.resolve(ROOT, cfg.data);
+  // a checkpoint from an earlier run is never finalized into this one
+  fs.rmSync(checkpointFile(cache), { force: true });
   const store = new Store(path.join(cache, "lib"), cfg.hub);
 
   const dropped = store.verify();
@@ -303,19 +322,66 @@ async function main(): Promise<void> {
     }
   }
   log(`${tasks.length} checks on ${cols.filter((c) => !c.broken).length} compilers, ${cfg.jobs} at a time`);
+
+  // The checkpoint: the run so far, rewritten at most every 10 s, and
+  // finalized into the outputs at the end, on SIGINT or SIGTERM, or when
+  // the harness throws. Cells not run by then are marked skipped, with why.
+  const pending = new Map<string, [string, string]>(tasks.map(([r, c]) => [r.hash + " " + c.id, [r.hash, c.id]]));
+  const cp: Checkpoint = {
+    draft: {
+      schema: 1, started,
+      hub: { url: cfg.hub, total: listed.length, named, checked: rows.length },
+      compilers: cols.map(({ cmd: _cmd, ...c }) => c),
+      packages: rows, results,
+      runner: runnerInfo(rss), timeoutS: cfg.timeout,
+      memCapMb: watchdog() ? cfg.memCapMb : 0, cellTimeoutS: cfg.cellTimeout,
+    },
+    t0, pending: [], total: tasks.length,
+    out: { data: dataDir, page: path.resolve(ROOT, cfg.page), historyKeep: cfg.historyKeep },
+  };
+  const cpFile = checkpointFile(cache);
+  let saved = 0;
+  const save = () => {
+    cp.pending = [...pending.values()];
+    writeCheckpoint(cpFile, cp);
+    saved = Date.now();
+  };
+  save();
+  active = { cp, file: cpFile };
+  let stopped: string | null = null;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      if (stopped === null) {
+        stopped = `the run was stopped by ${sig}`;
+        log(`${sig}: stopping the checks in flight, then writing a partial run`);
+        stopAll();
+      }
+    });
+  }
+
   let done = 0;
   const budgetEnd = t0 + cfg.budgetMin * 60_000;
-  await pool(tasks, cfg.jobs, async ([r, c]) => {
-    const cell = Date.now() > budgetEnd
-      ? { s: "skipped" as const, x: `not run: the run passed its ${cfg.budgetMin} min budget` }
-      : await checkOne(r, c);
+  await pool(tasks, cfg.jobs, () => stopped !== null || Date.now() > budgetEnd, async ([r, c]) => {
+    const cell = await checkOne(r, c);
+    if (cell === null) {
+      return;   // stopped: the cell stays pending
+    }
     results[r.hash][c.id] = cell;
+    pending.delete(r.hash + " " + c.id);
     done++;
     if (done % 25 === 0 || !isPass(cell.s)) {
       log(`[${done}/${tasks.length}] ${label(r)} on ${c.id}: ${cell.s} (${cell.check_ms ?? "-"} ms)`);
     }
+    if (Date.now() - saved > 10_000) {
+      save();
+    }
   });
   fake.stop(true);
+  save();
+  finish(stopped ?? (pending.size > 0 ? `the run passed its ${cfg.budgetMin} min budget` : null));
+  if (stopped !== null) {
+    process.exit(1);
+  }
 
   // where names the file an error points at: bend prints the line but not
   // the file, so find the package (or dependency) file with that line there.
@@ -347,13 +413,12 @@ async function main(): Promise<void> {
       : `over the ${cfg.memCapMb} MB memory cap: killed after ${(p.ms / 1000).toFixed(1)} s at ${peak} MB (sampled every 200 ms)`;
   }
 
-  const STOPPED: Cell = { s: "skipped", x: "not run: the run was stopped" };
-
   // checkOne runs every step of one cell (the check, the in-place checks,
   // the run lane) under the cell's memory cap and within one wall-clock
   // limit for the whole cell, cfg.cellTimeout: each step's own timeout is
   // cut to what is left, and a step with nothing left does not start.
-  async function checkOne(r: PkgRow, c: Col): Promise<Cell> {
+  // A cell whose process was killed because the run is stopping is null.
+  async function checkOne(r: PkgRow, c: Col): Promise<Cell | null> {
     if (r.roots.length === 0) {
       return { s: "fail-parse", x: "the package has no .bend file" };
     }
@@ -368,7 +433,7 @@ async function main(): Promise<void> {
       const capped = cfg.timeout * 1000 > left();
       const p = await exec([...c.cmd, wrapper, "--check-only"], lim(cfg.timeout, work, true));
       if (p.stopped) {
-        return { ...STOPPED };
+        return null;
       }
       const text = clean(p.err + "\n" + p.out, subs);
       let s: Status = classify(p, text);
@@ -411,7 +476,7 @@ async function main(): Promise<void> {
         }
         const p = await exec([...c.cmd, path.join(store.lib, r.hash, f), "--check-only"], lim(cfg.timeout));
         if (p.stopped) {
-          return { ...STOPPED };
+          return null;
         }
         const text = clean(p.out, subs);
         if (p.code === 0 && classify(p, text) === "pass-unsafe") {
@@ -433,7 +498,7 @@ async function main(): Promise<void> {
         const p = await exec([...c.cmd, path.join(store.lib, r.hash, f)], lim(cfg.runTimeout, cwd));
         fs.rmSync(cwd, { recursive: true, force: true });
         if (p.stopped) {
-          return { ...STOPPED };
+          return null;
         }
         const text = clean(p.err + "\n" + p.out, subs);
         const ro: RunOutcome = { f, s: p.oom ? "oom" : p.timedOut ? "timeout" : p.code === 0 ? "ok" : "fail", ms: p.ms };
@@ -445,40 +510,14 @@ async function main(): Promise<void> {
     }
     return out;
   }
-
-  // 6. Results, regressions, history, page.
-  const resultsFile = path.join(dataDir, "results.json");
-  const prev = readJson<Results | null>(resultsFile, null);
-  const res: Results = {
-    schema: 1, started, finished: new Date().toISOString(), seconds: Math.round((Date.now() - t0) / 1000),
-    hub: { url: cfg.hub, total: listed.length, named, checked: rows.length },
-    compilers: cols.map(({ cmd: _cmd, ...c }) => c),
-    packages: rows, results, regressions: [], brokeIn: {},
-    runner: runnerInfo(rss), timeoutS: cfg.timeout,
-    memCapMb: watchdog() ? cfg.memCapMb : 0, cellTimeoutS: cfg.cellTimeout,
-  };
-  res.brokeIn = brokeIn(res);
-  const timingsFile = path.join(dataDir, "timings.json");
-  const tm = updateTimings(readJson<Timings | null>(timingsFile, null), res.finished, results);
-  writeJson(timingsFile, tm);
-  res.perf = analyse(res.compilers, rows, results, tm, label);
-  res.regressions = regressions(res, prev !== null && prev.schema === 1 ? prev : null);
-  writeJson(resultsFile, res);
-  const histFile = path.join(dataDir, "history.json");
-  const hist = readJson<HistoryEntry[]>(histFile, []);
-  hist.push(historyEntry(res));
-  writeJson(histFile, hist.slice(-cfg.historyKeep));
-  const page = path.resolve(ROOT, cfg.page);
-  fs.mkdirSync(path.dirname(page), { recursive: true });
-  fs.writeFileSync(page, renderPage(res, hist.slice(-cfg.historyKeep)));
-  log(`wrote ${path.relative(ROOT, resultsFile)}, ${path.relative(ROOT, histFile)}, ${path.relative(ROOT, page)} in ${res.seconds} s`);
-  log(`${res.regressions.length} regressions`);
-  const flagged = res.perf.pairs.flatMap((p) => [...p.slowdowns, ...p.speedups]).filter((x) => x.flagged);
-  log(`timing: ${flagged.length} flagged changes; slowest: ` + Object.entries(res.perf.slowest)
-    .map(([c, xs]) => `${c} ${xs[0]?.pkg ?? "-"} ${xs[0]?.ms ?? 0} ms`).join(", "));
 }
 
 main().catch((e) => {
   log(String(e?.stack ?? e));
+  try {
+    finish("the harness failed: " + String(e?.message ?? e).split("\n")[0]);
+  } catch (e2) {
+    log("could not write a partial run: " + String(e2));
+  }
   process.exit(1);
 });

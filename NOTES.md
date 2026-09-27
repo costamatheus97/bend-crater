@@ -99,6 +99,41 @@ read the README instead.
   and the publish job refuses any other change.
 - The restored hub store is re-hashed on every start (about 0.3 s), and any
   package that no longer matches is refetched.
+- Partial runs. A killed or cancelled crater step still publishes what it
+  ran:
+  - `crater.ts` keeps `cache/checkpoint.json` (rewritten at most every
+    10 s, in one rename). On SIGINT or SIGTERM (a cancel, or the step's
+    `timeout-minutes`), it kills the process groups in flight, marks the
+    cells not run as `skipped` with the reason, and finalizes. It does the
+    same when the harness throws, or when the budget runs out.
+  - If the process is killed outright, the `if: failure() || cancelled()`
+    step runs `src/finalize.ts`, which finalizes the checkpoint it left. It
+    does nothing when the checkpoint was finalized already.
+  - The artifact is uploaded only when the checkpoint was finalized, so a
+    run that died before its checks uploads nothing.
+  - `publish` runs on `always()`, and `deploy` on `always()` plus publish's
+    `ok`: with a plain `needs:`, a failed crater job skips them both.
+    Publish runs `src/validate.ts` from its own checkout. That refuses
+    outputs that do not parse, a run no newer than the committed one (when
+    the download failed, the files on disk are the committed ones), and a
+    run in which fewer than 2% of cells ran. It then renders the page again
+    from the checked data, so the served HTML never comes from the job
+    that ran hub code.
+- None of that helps when the runner itself dies. On 2026-09-27 the runner
+  ran out of memory, GitHub shut it down, and every later step was skipped,
+  `if: always()` included. So the crater step runs under
+  `scripts/scoped.sh`: a transient systemd scope capped at 85% of the
+  runner's memory, so the kernel kills inside the scope instead. It tries a
+  user scope, then a system scope through passwordless sudo that drops back
+  to the runner user, and otherwise runs without one. The per-cell
+  watchdog (4 GB) should keep the scope's cap from ever being reached.
+- Time budget: the crater stops starting cells after `budgetMin` (300 min
+  from its start), and a started cell ends within `cellTimeout` (15 min),
+  so the crater is done by about 315 min. The step's `timeout-minutes` is
+  325 and the job's is 340, which leaves time to finalize, save the caches
+  and upload. A normal run of 992 cells takes 15 to 20 min.
+- A `workflow_dispatch` with `only` set is a test run: it runs the checks
+  and uploads the artifact, and publishes nothing.
 - Cache keys:
   - the hub store: `hub-lib-<run_id>`, restored by prefix, so it
     accumulates;

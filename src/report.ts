@@ -72,10 +72,14 @@ export interface Results {
   memCapMb?: number;         // the memory cap on each cell (0: none)
   cellTimeoutS?: number;     // the wall-clock limit on each cell
   perf?: Perf;
+  // a run that did not run every cell: why, and how many it ran. Its cells
+  // not run are `skipped`, with the reason.
+  partial?: { reason: string; done: number; total: number };
 }
 
 export interface HistoryEntry {
   finished: string;
+  partial?: boolean;
   cpu?: string;
   flagged?: { pkg: string; newer: string; older: string; ratio: number }[];
   compilers: { id: string; version: string; sha?: string }[];
@@ -166,6 +170,7 @@ export function counts(r: Results): Record<string, Record<string, number>> {
 export function historyEntry(r: Results): HistoryEntry {
   return {
     finished: r.finished,
+    ...(r.partial ? { partial: true } : {}),
     compilers: r.compilers.map((c) => ({ id: c.id, version: c.version, ...(c.sha ? { sha: c.sha } : {}) })),
     counts: counts(r),
     ...(r.runner ? { cpu: r.runner.cpu } : {}),
