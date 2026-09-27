@@ -90,6 +90,13 @@ td.c button { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; border:
 td.c button small { display: block; font-weight: 400; font-size: 10px; margin-top: 3px; opacity: .8; }
 td.c button small.t1 { opacity: 1; font-weight: 700; text-decoration: underline; }
 td.c button small.t2 { opacity: 1; font-weight: 700; text-decoration: underline double; }
+.lanes { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 14px; }
+.lanes.bad { border-left: 4px solid var(--parse-fg); }
+.lanes table { width: auto; font-size: 13px; margin: 6px 0 4px; }
+.lanes td, .lanes th { padding: 3px 12px 3px 0; border: 0; white-space: normal; vertical-align: top; }
+.lanes .muted { color: var(--mut); }
+.lanes .alarm { color: var(--parse-fg); font-weight: 700; }
+.lanes .ok { color: var(--pass-fg); font-weight: 600; }
 .perf { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 14px; }
 .perf table { width: auto; font-size: 13px; margin: 4px 0 10px; }
 .perf td, .perf th { padding: 3px 10px 3px 0; border: 0; white-space: normal; }
@@ -136,6 +143,9 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
 <h2>Regressions</h2>
 <div class="reg" id="reg"></div>
 
+<h2>Lane agreement</h2>
+<div class="lanes" id="lanes"></div>
+
 <h2>Checker performance</h2>
 <div class="perf" id="perf"></div>
 
@@ -151,7 +161,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
 <noscript><p>The matrix needs JavaScript. The raw results are in <a href="https://github.com/costamatheus97/bend-crater/blob/main/data/results.json">data/results.json</a>.</p></noscript>
 
 <footer>
-  <p>Each cell runs <code>bend &lt;wrapper&gt; --check-only</code>, where the wrapper imports the package's entry file by hash, under a timeout. Checks run offline against a verified copy of the hub. A package whose entry defines <code>main</code> and has no foreign effects also has <code>main</code> run once (marked ▸). No GPU lanes. Click a cell for its error lines.</p>
+  <p>Each cell runs <code>bend &lt;wrapper&gt; --check-only</code>, where the wrapper imports the package's entry file by hash, under a timeout. Checks run offline against a verified copy of the hub. A package whose entry defines <code>main</code> and has no foreign effects also has <code>main</code> run once (marked ▸); on main and the latest release, that <code>main</code> is also built for the C and JS lanes and their output compared (≠ marks a disagreement). No GPU lanes. Click a cell for its error lines.</p>
   <p><a href="https://github.com/costamatheus97/bend-crater">Source, raw JSON and history</a> · Apache-2.0 · Results are informational: a failure can be the package's, the compiler's or this harness's.</p>
 </footer>
 </main>
@@ -238,6 +248,42 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   var broke = Object.keys(R.brokeIn || {}).length;
   if (broke) reg.appendChild(el("div", { cls: "v", style: "margin-top:8px;color:var(--mut);font-size:13px", text: broke + " package" + (broke === 1 ? "" : "s") + " passed on one release in the window and fail on the next: see the “broke in” column." }));
 
+  var LANE = { "same": "same output", "differs": "DIFFERENT OUTPUT", "nondet": "differs, but the program's own output varies", "build-fail": "build failed", "run-fail": "exited non-zero", "timeout": "timed out", "oom": "over the memory cap", "unavailable": "not compared" };
+  (function () {
+    var box = document.getElementById("lanes"), progs = [];
+    R.packages.forEach(function (p) {
+      R.compilers.forEach(function (c) {
+        var cell = (R.results[p.hash] || {})[c.id];
+        (cell && cell.run || []).forEach(function (r) { if (r.lanes) progs.push({ p: p, c: c, cell: cell, r: r }); });
+      });
+    });
+    if (!progs.length) { box.appendChild(el("div", { cls: "muted", text: "No lane comparison in this run." })); return; }
+    var bad = progs.filter(function (x) { return Object.keys(x.r.lanes).some(function (k) { return x.r.lanes[k].s === "differs"; }); });
+    var agree = progs.filter(function (x) { return Object.keys(x.r.lanes).every(function (k) { return x.r.lanes[k].s === "same"; }); });
+    var other = progs.filter(function (x) { return bad.indexOf(x) < 0 && agree.indexOf(x) < 0; });
+    box.appendChild(el("div", { cls: "muted", text: "Each main that ran cleanly on main or the latest release is also built with bend -o for C (clang -O3, CPU only) and JS (Bun), and each lane's output is compared with bend's own run. That run is the interpreter for a main that returns a value, and Bend's JS runtime for an IO main." }));
+    if (bad.length) box.classList.add("bad");
+    box.appendChild(el("div", { style: "margin-top:8px" }, [
+      el("span", { cls: bad.length ? "alarm" : "ok", text: bad.length ? bad.length + " disagreement" + (bad.length === 1 ? "" : "s") : "No disagreements" }),
+      document.createTextNode(" · " + agree.length + " of " + progs.length + " program runs print the same on every lane" + (other.length ? " · " + other.length + " could not be compared on some lane" : ""))]));
+    function table(list, strong) {
+      var t = el("table");
+      list.forEach(function (x) {
+        var tr = el("tr");
+        tr.appendChild(el("td", { cls: "mono", text: pkgLabel(x.p) }));
+        tr.appendChild(el("td", { text: colName(x.c) + " · " + x.r.f }));
+        tr.appendChild(el("td", { cls: strong ? "" : "muted", text: Object.keys(x.r.lanes).map(function (k) { var l = x.r.lanes[k]; return k + ": " + (LANE[l.s] || l.s) + (l.s !== "same" && l.x ? " (" + l.x + ")" : ""); }).join("; ") }));
+        tr.style.cursor = "pointer";
+        tr.onclick = function () { show(x.p, x.c, x.cell); };
+        t.appendChild(tr);
+      });
+      return t;
+    }
+    if (bad.length) { box.appendChild(el("div", { style: "margin-top:10px" }, [el("b", { cls: "alarm", text: "Lanes that printed something else" })])); box.appendChild(table(bad, true)); }
+    if (other.length) { box.appendChild(el("div", { style: "margin-top:10px" }, [el("b", { text: "Not compared on every lane" })])); box.appendChild(table(other, false)); }
+    if (agree.length) { box.appendChild(el("div", { style: "margin-top:10px" }, [el("b", { text: "Agree on every lane" })])); var names = {}; agree.forEach(function (x) { names[pkgLabel(x.p)] = (names[pkgLabel(x.p)] || []).concat(colName(x.c)); }); box.appendChild(el("div", { cls: "muted mono", text: Object.keys(names).map(function (n) { return n + " (" + names[n].join(", ") + ")"; }).join(" · ") })); }
+  })();
+
   var perf = document.getElementById("perf"), P = R.perf;
   if (!P) { perf.appendChild(el("div", { cls: "muted", text: "No timing data in this run." })); }
   else {
@@ -303,12 +349,12 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
       else {
         if (isFail(cell.s)) failing = true;
         var runBad = cell.run && cell.run.some(function (r) { return r.s !== "ok"; });
-        var laneBad = cell.run && cell.run.some(function (r) { return r.lanes && Object.keys(r.lanes).some(function (k) { return r.lanes[k] !== "same"; }); });
+        var laneBad = cell.run && cell.run.some(function (r) { return r.lanes && Object.keys(r.lanes).some(function (k) { return r.lanes[k].s === "differs"; }); });
         var t = secs(cell);
         if (cell.check_ms != null && cell.check_ms > slowMs) slowMs = cell.check_ms;
         if (cell.s === "timeout") slowMs = Infinity;
         var b = el("button", { type: "button", cls: "s-" + cell.s, "aria-label": pkgLabel(p) + " on " + colName(c) + ": " + LONG[cell.s] + (t ? ", " + t : ""), title: t },
-          [SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : "") + (laneBad ? "≠" : ""), t ? el("small", { cls: cell.s === "timeout" || cell.check_ms >= 10000 ? "t2" : cell.check_ms >= 1000 ? "t1" : "", text: t }) : null]);
+          [SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : "") + (laneBad ? " ≠" : ""), t ? el("small", { cls: cell.s === "timeout" || cell.check_ms >= 10000 ? "t2" : cell.check_ms >= 1000 ? "t1" : "", text: t }) : null]);
         b.onclick = function () { show(p, c, cell); };
         td.appendChild(b);
       }
@@ -351,7 +397,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     (cell.run || []).forEach(function (r) {
       dc.appendChild(el("div", { style: "margin-top:8px", text: "▸ ran main in " + r.f + ": " + (r.s === "ok" ? "exited 0" : r.s === "timeout" ? "still running at the timeout" : r.s === "oom" ? "went over the memory cap" : "exited non-zero") + " (" + (r.ms / 1000).toFixed(1) + " s)" }));
       if (r.x) dc.appendChild(el("pre", { text: r.x }));
-      if (r.lanes) dc.appendChild(el("pre", { text: Object.keys(r.lanes).map(function (k) { return k + " lane: " + r.lanes[k]; }).join("\n") }));
+      if (r.lanes) dc.appendChild(el("pre", { text: Object.keys(r.lanes).map(function (k) { var l = r.lanes[k]; return k + " lane: " + (LANE[l.s] || l.s) + (l.x && l.x !== "same" ? ": " + l.x : ""); }).join("\\n") }));
     });
     detail.classList.add("open");
   }

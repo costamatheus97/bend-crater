@@ -200,21 +200,3 @@ export function classify(p: Proc, text: string): Status {
 
 export const isPass = (s: string | undefined) => s === "pass" || s === "pass-unsafe";
 export const isFail = (s: string | undefined) => s !== undefined && !isPass(s) && s !== "skipped";
-
-// laneDiff compares a lane's stdout with the interpreter's: null when they
-// are the same, else the first line that differs, as "line N: io 'a', lane
-// 'b'". A lane that prints more or less than the interpreter differs at the
-// first line one of them lacks.
-export function laneDiff(io: string, got: string, width = 60): string | null {
-  if (io === got) {
-    return null;
-  }
-  const a = io.split("\n"), b = got.split("\n");
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) {
-    i++;
-  }
-  const q = (l: string | undefined) => l === undefined ? "(end)"
-    : "'" + (l.length > width ? l.slice(0, width - 1) + "…" : l) + "'";
-  return `line ${i + 1}: io ${q(a[i])}, lane ${q(b[i])}`;
-}

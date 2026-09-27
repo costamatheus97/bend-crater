@@ -65,13 +65,26 @@ before filing anything upstream.
      foreign (`.c`/`.js`) effects, `main` is run once in an empty directory
      with a 20 s timeout. The cell is then marked ▸, or ▸! if that run exited
      non-zero or timed out. The run does not change the check's status.
-   - With `--lane-diff`, a `main` that ran cleanly is also built with
-     `bend -o m.c` (compiled with `$CC -O2`, default `cc`) and `bend -o m.js`
-     (run with `bun`), and each lane's stdout is compared with the
-     interpreter's. The cell gets a `≠` if a lane printed something else,
-     and its details name the first differing line. Off by default: a
-     program that prints the time, a random number or its thread count
-     differs by design.
+   - **Lane diff** (on by default; `--no-lane-diff` turns it off): on
+     `main` and the latest release, a `main` that ran cleanly is also built
+     for two more lanes, and each lane's stdout is compared with that run's:
+     - C: `bend -o m.c`, then clang 14 or newer (`$CC`, else the newest
+       `clang` on `PATH`, as `bend -o` picks it; gcc cannot build Bend's C)
+       with `-std=c11 -O3`, on the CPU only (no `-DBEND_CUDA`, and the
+       binary runs with `--gpu off`);
+     - JS: `bend -o m.js`, run with Bun.
+
+     The reference is `bend file.bend`: the interpreter for a `main` that
+     returns a value, and Bend's JS runtime for an IO `main`, so for IO
+     programs the C lane is the independent one. Each lane builds and runs
+     in its own empty directory, under the cell's memory cap and wall-clock
+     limit. When a lane prints something else, the reference runs once
+     more: if it too prints something else, the program's output varies
+     (the time, a random number, its thread count) and the lane is marked
+     `nondet` rather than flagged. A real disagreement puts `≠` in the cell
+     and is listed at the top of the page's **Lane agreement** section,
+     with the first differing line. A lane that could not build or run is
+     listed there, but not flagged.
    - A crash or fetch failure is retried once. A timeout is not retried.
 5. **Compares.** Regressions are listed at the top of the page:
    - **next release:** passes on the latest release, fails on `main`;
@@ -186,7 +199,7 @@ Options (defaults in `crater.json`):
 | `--cell-timeout S` | 900 | the wall-clock limit on each cell: the check, the in-place checks and the run lane together |
 | `--no-rss` | | do not wrap checks in GNU `time` |
 | `--no-run` | | skip the run lane |
-| `--lane-diff` | | also build `main` for the C and JS lanes and compare their output |
+| `--lane-diff` / `--no-lane-diff` | on | build `main` for the C and JS lanes on `main` and the latest release, and compare their output |
 | `--nice` / `--no-nice` | nice locally | run compilers under `nice -n 19` |
 | `--cache DIR` `--data DIR` `--page FILE` | `cache` `data` `docs/index.html` | where things go |
 
@@ -197,12 +210,13 @@ Later runs fetch only new packages. The checks themselves take a few minutes.
 
 ## Limits
 
-- **CPU only.** There are no GPU lanes (Metal, CUDA), and no C or JS build
-  lanes. A package is checked, not compiled.
+- **CPU only.** There are no GPU lanes (Metal, CUDA). The C and JS lanes
+  build only packages whose `main` runs, and only on `main` and the latest
+  release.
 - **Checks, plus cheap runs.** Laws and proofs are checked, because checking
   is what `--check-only` does. Tests are rarely published to the hub, and
-  only an entry file's `main` is run. There is no differential testing
-  between lanes.
+  only an entry file's `main` is run. The lane diff compares only what
+  that `main` prints.
 - **Entry-file guess.** The entry is inferred from the import graph. A
   package whose entry is imported by another of its own files would be
   checked through that file instead. The check still covers the same files.

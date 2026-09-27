@@ -3,7 +3,7 @@
 //
 //   bun src/crater.ts [--releases N] [--no-main] [--bend PATH]... [--only RE]
 //                     [--anon edges|all|none] [--jobs N] [--timeout S]
-//                     [--run-timeout S] [--no-run] [--lane-diff] [--no-nice] [--dry]
+//                     [--run-timeout S] [--no-run] [--[no-]lane-diff] [--no-nice] [--dry]
 //                     [--cache DIR] [--data DIR] [--page FILE]
 //                     [--releases-json FILE] [--no-rss] [--budget-min M]
 //                     [--mem-cap MB] [--cell-timeout S]
@@ -18,7 +18,8 @@ import { listPackages, Store, type HubPackage } from "./hub";
 import { checkpointFile, finalize, writeCheckpoint, type Checkpoint } from "./finalize";
 import { inspect, type PkgInfo } from "./pkg";
 import { label, type Cell, type PkgRow, type Runner, type RunOutcome } from "./report";
-import { classify, clean, exec, excerpt, isPass, laneDiff, peakKb, rssTool, stopAll, type ExecOpts, type Proc, type Status } from "./run";
+import { classify, clean, exec, excerpt, isPass, peakKb, rssTool, stopAll, type ExecOpts, type Proc, type Status } from "./run";
+import { cBuild, compare, failed, findClang, LANES, settle, type Lane } from "./lanes";
 import { available as watchdog, memTotalKb, setTotalCap } from "./watch";
 import { log, readJson, ROOT } from "./util";
 
@@ -72,6 +73,7 @@ function config(argv: string[]): Config {
       case "--run-timeout": c.runTimeout = parseInt(v(), 10); break;
       case "--no-run": c.run = false; break;
       case "--lane-diff": c.laneDiff = true; break;
+      case "--no-lane-diff": c.laneDiff = false; break;
       case "--no-rss": c.rss = false; break;
       case "--budget-min": c.budgetMin = parseInt(v(), 10); break;
       case "--mem-cap": c.memCapMb = parseInt(v(), 10); break;
@@ -260,6 +262,13 @@ async function main(): Promise<void> {
     if (cfg.jobs > 1) {
       setTotalCap(Math.round(memTotalKb() * 0.8));
     }
+  }
+
+  // The lane diff builds C with clang 14 or newer, as bend -o does.
+  const clang = cfg.laneDiff ? findClang(process.env) : null;
+  if (cfg.laneDiff) {
+    log(clang === null ? "lane diff: no clang 14 or newer, so the C lane is marked unavailable"
+      : `lane diff: C lane with ${clang.cc} (clang ${clang.version}); lanes run on main and the latest release`);
   }
 
   // Each compiler first checks a file with no imports but Base; one that
@@ -506,40 +515,80 @@ async function main(): Promise<void> {
         const ro: RunOutcome = { f, s: p.oom ? "oom" : p.timedOut ? "timeout" : p.code === 0 ? "ok" : "fail", ms: p.ms };
         if (ro.s !== "ok") {
           ro.x = ro.s === "oom" ? oomText(p) : ro.s === "timeout" ? `main ran past ${Math.round(p.ms / 1000)} s` : excerpt(text, 5);
-        } else if (cfg.laneDiff) {
-          ro.lanes = await lanes(c, path.join(store.lib, r.hash, f), cwd, p.out, lim);
         }
         fs.rmSync(cwd, { recursive: true, force: true });
+        if (ro.s === "ok" && cfg.laneDiff && edge.has(c.id)) {
+          const ls = await lanes(c, path.join(store.lib, r.hash, f), p, lim);
+          if (ls === null) {
+            return null;
+          }
+          ro.lanes = ls;
+        }
         out.run.push(ro);
       }
     }
     return out;
   }
 
-  // lanes builds main with `-o` for the C lane (cc -O2) and the JS lane
-  // (bun) under the check's timeout, runs each in the run's directory under
-  // the run's timeout, and compares its stdout with the interpreter's. A
-  // program that prints its thread count, the time or a random number
-  // differs by design; F32 math, prints and parses should not.
-  async function lanes(c: Col, file: string, cwd: string, io: string, lim: (capS: number, cwd?: string) => ExecOpts): Promise<Record<string, string>> {
-    const got: Record<string, string> = {};
-    const steps: Record<string, string[][]> = {
-      c: [[...c.cmd, file, "-o", "m.c"], [process.env.CC ?? "cc", "-std=c11", "-O2", "m.c", "-lpthread", "-lm", "-o", "m"], ["./m"]],
-      js: [[...c.cmd, file, "-o", "m.js"], ["bun", "m.js"]],
-    };
-    for (const [lane, argvs] of Object.entries(steps)) {
-      for (const [i, argv] of argvs.entries()) {
-        const last = i === argvs.length - 1;
-        const p = await exec(argv, lim(last ? cfg.runTimeout : cfg.timeout, cwd));
-        if (p.timedOut || p.code !== 0) {
-          const why = p.timedOut ? "timed out" : "exited " + (p.code ?? p.signal);
-          got[lane] = (last ? "ran" : "build " + (i + 1)) + " " + why + ": " + excerpt(clean(p.err + "\n" + p.out, subs), 2);
-          break;
-        }
-        if (last) {
-          got[lane] = laneDiff(io, p.out) ?? "same";
-        }
+  // lanes builds main for the C lane and the JS lane, each in a fresh
+  // directory (so what the reference run or another lane wrote there cannot
+  // change it), runs it, and compares its stdout with the reference's (see
+  // lanes.ts). Every step is under the cell's memory cap and deadline: the
+  // builds under the check's timeout, the runs under the run's. When a lane
+  // printed something else, the reference runs once more, to tell a
+  // disagreement from a program whose output varies. null: the run stopped.
+  async function lanes(c: Col, file: string, io: Proc, lim: (capS: number, cwd?: string) => ExecOpts): Promise<Record<string, Lane> | null> {
+    const got: Record<string, Lane> = {};
+    for (const lane of LANES) {
+      if (lane === "c" && clang === null) {
+        got[lane] = { s: "unavailable", x: "no clang 14 or newer to build the C (gcc cannot)" };
+        continue;
       }
+      const dir = fs.mkdtempSync(path.join(work, "lane-"));
+      try {
+        const emit = await exec([...c.cmd, file, "-o", lane === "c" ? "m.c" : "m.js"], lim(cfg.timeout, dir));
+        if (emit.stopped) {
+          return null;
+        }
+        if (emit.code !== 0 || emit.timedOut || emit.oom) {
+          got[lane] = failed("build", emit, clean(emit.err + "\n" + emit.out, subs));
+          continue;
+        }
+        if (lane === "c") {
+          const argv = cBuild((clang as { cc: string }).cc, fs.readFileSync(path.join(dir, "m.c"), "utf8"));
+          if (typeof argv === "string") {
+            got[lane] = { s: "unavailable", x: argv };
+            continue;
+          }
+          const cc = await exec(argv, lim(cfg.timeout, dir));
+          if (cc.stopped) {
+            return null;
+          }
+          if (cc.code !== 0 || cc.timedOut || cc.oom) {
+            got[lane] = failed("build", cc, clean(cc.err + "\n" + cc.out, subs));
+            continue;
+          }
+        }
+        // the C binary runs on the CPU only, whatever the machine has
+        const run = await exec(lane === "c" ? ["./m", "--gpu", "off"] : [process.execPath, "m.js"], lim(cfg.runTimeout, dir));
+        if (run.stopped) {
+          return null;
+        }
+        got[lane] = run.code !== 0 || run.timedOut || run.oom
+          ? failed("run", run, clean(run.err + "\n" + run.out, subs))
+          : { ...compare(io, run), ms: run.ms };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    if (Object.values(got).some((l) => l.s === "differs")) {
+      const dir = fs.mkdtempSync(path.join(work, "run-"));
+      const again = await exec([...c.cmd, file], lim(cfg.runTimeout, dir));
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (again.stopped) {
+        return null;
+      }
+      return settle(got, io.out, again.code === 0 && !again.timedOut && !again.oom ? again.out : null);
     }
     return got;
   }

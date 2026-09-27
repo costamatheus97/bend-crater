@@ -78,6 +78,32 @@ read the README instead.
   lane) share one wall-clock limit, `--cell-timeout`. Each step's timeout
   is cut to what is left of it.
 
+## Lane diff
+
+- The reference is the run lane, `bend file.bend`. For an IO `main`, bend
+  compiles to JS and runs it in-process (`Comp.io_run`, a `new Function`
+  over the emitted JS), so the JS lane shares that emitter. The C lane is
+  the independent check for IO programs. For a value `main`, the
+  reference is the interpreter (`term_snf`).
+- The C lane needs clang: Bend's C uses `__attribute__((musttail))`, which
+  gcc rejects. The C compiler is picked as `bend -o` picks it (`$CC`, then
+  `clang`, then `clang-NN`, newest first, 14 or newer). The build is
+  `-std=c11 -O3 -lpthread -lm`, with no `-DBEND_CUDA` or `-DBEND_METAL`, so
+  it is a CPU build, and the binary runs with `--gpu off`. Window and audio
+  programs (X11 or ALSA includes) are not built. ubuntu-24.04 has clang
+  18.1.3 as `clang`. Locally without clang, `zig cc` (clang 21, from the
+  `ziglang` wheel) works as `CC`.
+- Each lane builds and runs in its own `mkdtemp` directory. The first
+  version reused the run lane's directory, so a `main` that wrote a
+  `bunfig.toml` or `.env` there would have changed how the JS lane ran.
+- Output is cut at exactly 64 KiB on every lane, so long outputs compare
+  their first 64 KiB. The old cap appended whole chunks, which cut each
+  process at a different point.
+- A disagreement triggers a second reference run. If that differs too, the
+  lane is `nondet` (the program's output varies) and is not flagged.
+- Lanes run only on `main` and the latest release, to keep within the
+  budget.
+
 ## Regressions
 
 - Cells are keyed by compiler id: the version for releases, `main` for main.
@@ -145,8 +171,6 @@ read the README instead.
 
 - Run packages' laws and tests more fully. Tests are rarely published, so
   this needs each package's source repo, found from `desc` links.
-- Lane checks: build with `-o x.c` and `-o x.js`, then run both and compare
-  outputs (differential).
 - A per-package badge (an SVG or a shields endpoint JSON).
 - A "first compiler it checks on" column, for packages that never passed in
   the window.

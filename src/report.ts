@@ -2,6 +2,7 @@
 
 import type { Compiler } from "./compilers";
 import { cmpVersion } from "./compilers";
+import type { Lane } from "./lanes";
 import type { Perf } from "./perf";
 import { isFail, isPass, type Status } from "./run";
 
@@ -10,9 +11,8 @@ export interface RunOutcome {
   s: "ok" | "fail" | "timeout" | "oom";
   ms: number;
   x?: string;
-  // --lane-diff: per lane (c, js), "same", or how its stdout differs from
-  // the interpreter's, or why the lane did not run
-  lanes?: Record<string, string>;
+  // --lane-diff: per lane (c, js), how its output compared with this run's
+  lanes?: Record<string, Lane>;
 }
 
 export interface Cell {
@@ -87,6 +87,7 @@ export interface HistoryEntry {
   flagged?: { pkg: string; newer: string; older: string; ratio: number }[];
   compilers: { id: string; version: string; sha?: string }[];
   counts: Record<string, Record<string, number>>;
+  lanes?: Record<string, number>;   // lane-diff verdicts by status
   regressions: { pkg: string; kind: string; from: string; to: string }[];
 }
 
@@ -176,9 +177,27 @@ export function historyEntry(r: Results): HistoryEntry {
     ...(r.partial ? { partial: true } : {}),
     compilers: r.compilers.map((c) => ({ id: c.id, version: c.version, ...(c.sha ? { sha: c.sha } : {}) })),
     counts: counts(r),
+    ...(laneCounts(r) !== null ? { lanes: laneCounts(r) as Record<string, number> } : {}),
     ...(r.runner ? { cpu: r.runner.cpu } : {}),
     flagged: (r.perf?.pairs ?? []).flatMap((p) => [...p.slowdowns, ...p.speedups])
       .filter((x) => x.flagged).map((x) => ({ pkg: x.pkg, newer: x.newer, older: x.older, ratio: x.ratio })),
     regressions: r.regressions.map((g) => ({ pkg: g.pkg, kind: g.kind, from: g.from, to: g.to })),
   };
+}
+
+// laneCounts counts the lane-diff verdicts of a run, or null without any
+export function laneCounts(r: Pick<Results, "results">): Record<string, number> | null {
+  const n: Record<string, number> = {};
+  let any = false;
+  for (const row of Object.values(r.results)) {
+    for (const cell of Object.values(row)) {
+      for (const ro of cell.run ?? []) {
+        for (const l of Object.values(ro.lanes ?? {})) {
+          n[l.s] = (n[l.s] ?? 0) + 1;
+          any = true;
+        }
+      }
+    }
+  }
+  return any ? n : null;
 }

@@ -12,6 +12,7 @@
   "rss": true,
   "runTimeout": 20,
   "run": true,
+  "laneDiff": true,
   "cache": "cache",
   "data": "data",
   "page": "docs/index.html",
