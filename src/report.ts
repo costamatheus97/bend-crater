@@ -7,7 +7,7 @@ import { isFail, isPass, type Status } from "./run";
 
 export interface RunOutcome {
   f: string;                 // the root whose main ran
-  s: "ok" | "fail" | "timeout";
+  s: "ok" | "fail" | "timeout" | "oom";
   ms: number;
   x?: string;
 }
@@ -15,7 +15,7 @@ export interface RunOutcome {
 export interface Cell {
   s: Status;
   check_ms?: number;         // wall time of the --check-only run (the last attempt)
-  rss_kb?: number;           // its peak RSS, when GNU time is available
+  rss_kb?: number;           // its peak RSS: GNU time's, or the memory watchdog's for the whole group
   x?: string;                // first error lines
   run?: RunOutcome[];
 }
@@ -69,6 +69,8 @@ export interface Results {
   brokeIn: Record<string, string>;   // hash -> first release it fails on after passing
   runner?: Runner;
   timeoutS?: number;
+  memCapMb?: number;         // the memory cap on each cell (0: none)
+  cellTimeoutS?: number;     // the wall-clock limit on each cell
   perf?: Perf;
 }
 

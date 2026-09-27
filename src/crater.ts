@@ -6,6 +6,7 @@
 //                     [--run-timeout S] [--no-run] [--no-nice] [--dry]
 //                     [--cache DIR] [--data DIR] [--page FILE]
 //                     [--releases-json FILE] [--no-rss] [--budget-min M]
+//                     [--mem-cap MB] [--cell-timeout S]
 //
 // Defaults come from crater.json. See README.md.
 
@@ -21,7 +22,8 @@ import {
   type Cell, type HistoryEntry, type PkgRow, type Results, type Runner, type RunOutcome,
 } from "./report";
 import { analyse, updateTimings, type Timings } from "./perf";
-import { classify, clean, exec, excerpt, isPass, rssTool, type Status } from "./run";
+import { classify, clean, exec, excerpt, isPass, peakKb, rssTool, type ExecOpts, type Proc, type Status } from "./run";
+import { available as watchdog, memTotalKb, setTotalCap } from "./watch";
 import { log, readJson, ROOT, writeJson } from "./util";
 
 type Col = Compiler & { broken?: string; base_ms?: number };
@@ -46,6 +48,8 @@ interface Config {
   releasesJson: string | null;
   rss: boolean;
   budgetMin: number;
+  memCapMb: number;
+  cellTimeout: number;
   dry: boolean;
 }
 
@@ -54,7 +58,8 @@ function config(argv: string[]): Config {
   const c: Config = {
     hub: "https://hub.bend-lang.com", releases: 6, main: true, mainRef: "main", bend: [], only: null,
     anon: "edges", jobs: 1, timeout: 120, runTimeout: 20, run: true, nice: !process.env.CI,
-    cache: "cache", data: "data", page: "docs/index.html", historyKeep: 90, releasesJson: null, rss: true, budgetMin: 300, dry: false, ...file,
+    cache: "cache", data: "data", page: "docs/index.html", historyKeep: 90, releasesJson: null, rss: true, budgetMin: 300,
+    memCapMb: 4096, cellTimeout: 900, dry: false, ...file,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i], v = () => argv[++i];
@@ -71,6 +76,8 @@ function config(argv: string[]): Config {
       case "--no-run": c.run = false; break;
       case "--no-rss": c.rss = false; break;
       case "--budget-min": c.budgetMin = parseInt(v(), 10); break;
+      case "--mem-cap": c.memCapMb = parseInt(v(), 10); break;
+      case "--cell-timeout": c.cellTimeout = parseInt(v(), 10); break;
       case "--no-nice": c.nice = false; break;
       case "--nice": c.nice = true; break;
       case "--dry": c.dry = true; break;
@@ -221,6 +228,19 @@ async function main(): Promise<void> {
   const subs: [string, string][] = [[fs.realpathSync(store.lib), "$LIB"], [store.lib, "$LIB"], [hubUrl, "$HUB"],
     [fs.realpathSync(work), "$WORK"], [work, "$WORK"]];
 
+  // Every process a cell starts runs under a memory cap on its process
+  // group (see watch.ts). With several jobs, the groups together may use
+  // at most 80% of the machine's memory; past that, the largest is killed.
+  const memCapKb = cfg.memCapMb * 1024;
+  if (!watchdog()) {
+    log("no /proc: checks run without a memory cap");
+  } else {
+    log(`memory cap: ${cfg.memCapMb} MB per cell` + (cfg.jobs > 1 ? `, ${Math.round(memTotalKb() * 0.8 / 1024)} MB for all cells together` : ""));
+    if (cfg.jobs > 1) {
+      setTotalCap(Math.round(memTotalKb() * 0.8));
+    }
+  }
+
   // Each compiler first checks a file with no imports but Base; one that
   // cannot is marked broken rather than failing every package.
   const smoke = path.join(work, "w", "smoke.bend");
@@ -229,7 +249,7 @@ async function main(): Promise<void> {
   // timing flags take off every cell (main runs from source through Bun).
   for (const c of cols) {
     for (let i = 0; i < 3 && c.broken === undefined; i++) {
-      const p = await exec([...c.cmd, smoke, "--check-only"], { cwd: work, env, timeoutMs: 120_000, nice: cfg.nice });
+      const p = await exec([...c.cmd, smoke, "--check-only"], { cwd: work, env, timeoutMs: 120_000, nice: cfg.nice, memCapKb });
       if (p.code !== 0) {
         c.broken = excerpt(clean(p.err + p.out, subs), 4) || `exit ${p.code} ${p.signal ?? ""}`;
         log(`compiler ${c.id} failed its smoke check: ${c.broken}`);
@@ -319,14 +339,37 @@ async function main(): Promise<void> {
     return hits.length === 1 ? "at " + hits[0] + "\n" : "";
   }
 
+  // oomText says how a process went over the memory cap
+  function oomText(p: Proc): string {
+    const peak = Math.round((peakKb(p) ?? 0) / 1024);
+    return p.oom === "total"
+      ? `killed after ${(p.ms / 1000).toFixed(1)} s at ${peak} MB: the cells in flight passed 80% of the machine's memory together, and this was the largest`
+      : `over the ${cfg.memCapMb} MB memory cap: killed after ${(p.ms / 1000).toFixed(1)} s at ${peak} MB (sampled every 200 ms)`;
+  }
+
+  const STOPPED: Cell = { s: "skipped", x: "not run: the run was stopped" };
+
+  // checkOne runs every step of one cell (the check, the in-place checks,
+  // the run lane) under the cell's memory cap and within one wall-clock
+  // limit for the whole cell, cfg.cellTimeout: each step's own timeout is
+  // cut to what is left, and a step with nothing left does not start.
   async function checkOne(r: PkgRow, c: Col): Promise<Cell> {
     if (r.roots.length === 0) {
       return { s: "fail-parse", x: "the package has no .bend file" };
     }
+    const end = Date.now() + cfg.cellTimeout * 1000;
+    const left = () => end - Date.now();
+    const lim = (capS: number, cwd = work, withRss = false): ExecOpts =>
+      ({ cwd, env, timeoutMs: Math.max(1, Math.min(capS * 1000, left())), nice: cfg.nice, memCapKb, rss: withRss && rss });
+    const wall = `the cell reached its ${cfg.cellTimeout} s wall limit`;
     const wrapper = path.join(work, "w", r.hash + ".bend");
     let cell: Cell | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const p = await exec([...c.cmd, wrapper, "--check-only"], { cwd: work, env, timeoutMs: cfg.timeout * 1000, nice: cfg.nice, rss });
+      const capped = cfg.timeout * 1000 > left();
+      const p = await exec([...c.cmd, wrapper, "--check-only"], lim(cfg.timeout, work, true));
+      if (p.stopped) {
+        return { ...STOPPED };
+      }
       const text = clean(p.err + "\n" + p.out, subs);
       let s: Status = classify(p, text);
       // bend asks the hub again when a path under a stored package does not
@@ -337,17 +380,24 @@ async function main(): Promise<void> {
       if (s === "fail-fetch" && asked !== null && store.has(asked[1])) {
         s = "fail-parse";
       }
+      const pk = peakKb(p);
       cell = {
-        s, check_ms: p.ms, ...(p.rssKb !== undefined ? { rss_kb: p.rssKb } : {}),
-        ...(isPass(s) ? {} : { x: s === "timeout" ? `no verdict in ${cfg.timeout} s` : where(r, text) + excerpt(text) }),
+        s, check_ms: p.ms, ...(pk !== undefined ? { rss_kb: pk } : {}),
+        ...(isPass(s) ? {} : {
+          x: s === "fail-oom" ? oomText(p)
+            : s === "timeout" ? (capped ? `no verdict before ${wall}` : `no verdict in ${cfg.timeout} s`)
+            : where(r, text) + excerpt(text),
+        }),
       };
       // a crash or a fetch failure is retried once; a timeout is not, since
-      // at the cap one slow package would cost the run an hour
-      if (s !== "crash" && s !== "fail-fetch") {
+      // at the cap one slow package would cost the run an hour, and neither
+      // is a check that went over the memory cap
+      if ((s !== "crash" && s !== "fail-fetch") || left() <= 0) {
         break;
       }
     }
     const out = cell as Cell;
+    const note = (msg: string) => { out.x = (out.x ? out.x + "\n" : "") + msg; };
     // A check through the wrapper reports no unsafe or foreign reliance,
     // since the wrapper defines nothing. Checking each entry file in place
     // does; if that check passes with the unsafe verdict, so is the cell.
@@ -355,11 +405,18 @@ async function main(): Promise<void> {
     // in the root namespace, which a user of the package never does.)
     if (out.s === "pass") {
       for (const f of r.roots) {
-        const p = await exec([...c.cmd, path.join(store.lib, r.hash, f), "--check-only"], { cwd: work, env, timeoutMs: cfg.timeout * 1000, nice: cfg.nice });
+        if (left() <= 0) {
+          note(`${wall}: the in-place check of ${f} did not run`);
+          break;
+        }
+        const p = await exec([...c.cmd, path.join(store.lib, r.hash, f), "--check-only"], lim(cfg.timeout));
+        if (p.stopped) {
+          return { ...STOPPED };
+        }
         const text = clean(p.out, subs);
         if (p.code === 0 && classify(p, text) === "pass-unsafe") {
           out.s = "pass-unsafe";
-          out.x = (out.x ? out.x + "\n" : "") + (r.roots.length > 1 ? f + ": " : "") + excerpt(text, 6);
+          note((r.roots.length > 1 ? f + ": " : "") + excerpt(text, 6));
         }
       }
     }
@@ -368,13 +425,20 @@ async function main(): Promise<void> {
     if (cfg.run && isPass(out.s) && r.mains.length > 0 && !r.foreign) {
       out.run = [];
       for (const f of r.mains) {
+        if (left() <= 0) {
+          out.run.push({ f, s: "timeout", ms: 0, x: `not run: ${wall}` });
+          continue;
+        }
         const cwd = fs.mkdtempSync(path.join(work, "run-"));
-        const p = await exec([...c.cmd, path.join(store.lib, r.hash, f)], { cwd, env, timeoutMs: cfg.runTimeout * 1000, nice: cfg.nice });
+        const p = await exec([...c.cmd, path.join(store.lib, r.hash, f)], lim(cfg.runTimeout, cwd));
         fs.rmSync(cwd, { recursive: true, force: true });
+        if (p.stopped) {
+          return { ...STOPPED };
+        }
         const text = clean(p.err + "\n" + p.out, subs);
-        const ro: RunOutcome = { f, s: p.timedOut ? "timeout" : p.code === 0 ? "ok" : "fail", ms: p.ms };
+        const ro: RunOutcome = { f, s: p.oom ? "oom" : p.timedOut ? "timeout" : p.code === 0 ? "ok" : "fail", ms: p.ms };
         if (ro.s !== "ok") {
-          ro.x = ro.s === "timeout" ? `main ran past ${cfg.runTimeout} s` : excerpt(text, 5);
+          ro.x = ro.s === "oom" ? oomText(p) : ro.s === "timeout" ? `main ran past ${Math.round(p.ms / 1000)} s` : excerpt(text, 5);
         }
         out.run.push(ro);
       }
@@ -391,6 +455,7 @@ async function main(): Promise<void> {
     compilers: cols.map(({ cmd: _cmd, ...c }) => c),
     packages: rows, results, regressions: [], brokeIn: {},
     runner: runnerInfo(rss), timeoutS: cfg.timeout,
+    memCapMb: watchdog() ? cfg.memCapMb : 0, cellTimeoutS: cfg.cellTimeout,
   };
   res.brokeIn = brokeIn(res);
   const timingsFile = path.join(dataDir, "timings.json");

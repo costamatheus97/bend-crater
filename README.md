@@ -42,6 +42,16 @@ before filing anything upstream.
    - optionally, a local `bend` binary.
 4. **Checks each package on each compiler:** `bend <wrapper> --check-only`,
    with a 600 s cap, and records the check's time.
+   - Every process a cell starts runs under a **memory cap** (4 GB by
+     default) on its whole process group, and every cell has a **wall-clock
+     limit** (900 s) for all its steps together. A cell over the memory cap
+     is killed and recorded as `oom`, with its peak. On 2026-09-27 one
+     anonymous package's check grew by about 450 MB/s until the runner ran
+     out of memory and GitHub shut the runner down, which lost the whole
+     run. The cap is enforced by a watchdog that samples each group's
+     resident memory every 200 ms: an address-space limit (`ulimit -v`)
+     would stop healthy checks, since Bun and Bend's native runtime reserve
+     far more virtual memory than they use.
    - The wrapper imports the package's entry files by hash, as a user of the
      package would: `import 0x<hash>/<entry>.bend as R0`. The hub does not
      record which file is the entry. `bend --publish` uploads exactly the
@@ -85,6 +95,7 @@ newest first. Click a cell to see the error lines.
 | `parse` | Failed to parse or load: a syntax or import error, with a location but no def. This includes an import the compiler cannot resolve, such as a `name@version` import on a release before 2.0.26. |
 | `check` | Failed to check: a type error, an undefined name or an unfilled law. |
 | `fetch` | A package or dependency could not be fetched, or was taken down. |
+| `oom` | The check went over the memory cap, and was killed. The details show its peak. |
 | `time` | No verdict within the timeout. |
 | `crash` | The compiler exited without an `Error:` block, from a signal, or with a stack overflow. |
 | `skip` | The compiler failed the harness's own smoke check. |
@@ -157,6 +168,8 @@ Options (defaults in `crater.json`):
 | `--jobs N` | 1 | checks at a time |
 | `--timeout S` / `--run-timeout S` | 600 / 20 | per check (not retried on timeout), per `main` run |
 | `--budget-min M` | 300 | stop starting checks after M minutes; the rest are marked `skip` |
+| `--mem-cap MB` | 4096 | the memory cap on each cell's processes (0: no cap; Linux only) |
+| `--cell-timeout S` | 900 | the wall-clock limit on each cell: the check, the in-place checks and the run lane together |
 | `--no-rss` | | do not wrap checks in GNU `time` |
 | `--no-run` | | skip the run lane |
 | `--nice` / `--no-nice` | nice locally | run compilers under `nice -n 19` |

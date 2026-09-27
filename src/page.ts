@@ -23,6 +23,7 @@ export function renderPage(r: Results, hist: HistoryEntry[]): string {
   --parse: #fbdada; --parse-fg: #7f1d1d; --check: #fde6cf; --check-fg: #7c2d12;
   --fetch: #ece3f8; --fetch-fg: #4c1d95; --timeout: #fbefc4; --timeout-fg: #713f12;
   --crash: #f6d3e4; --crash-fg: #831843; --skip: #eeeeec; --skip-fg: #57534e;
+  --oom: #e4e9f5; --oom-fg: #1e3a8a;
   --accent: #b45309; --link: #1d4ed8;
   color-scheme: light;
 }
@@ -33,6 +34,7 @@ export function renderPage(r: Results, hist: HistoryEntry[]): string {
     --parse: #481c1c; --parse-fg: #f7b4b4; --check: #4a2a12; --check-fg: #f8c79d;
     --fetch: #33204f; --fetch-fg: #d6c2f5; --timeout: #45380f; --timeout-fg: #f2dc92;
     --crash: #4a1932; --crash-fg: #f5b3d3; --skip: #2a2926; --skip-fg: #a8a29e;
+    --oom: #1f2a4a; --oom-fg: #b9c8f5;
     --accent: #f59e0b; --link: #93b4ff;
     color-scheme: dark;
   }
@@ -43,6 +45,7 @@ export function renderPage(r: Results, hist: HistoryEntry[]): string {
   --parse: #481c1c; --parse-fg: #f7b4b4; --check: #4a2a12; --check-fg: #f8c79d;
   --fetch: #33204f; --fetch-fg: #d6c2f5; --timeout: #45380f; --timeout-fg: #f2dc92;
   --crash: #4a1932; --crash-fg: #f5b3d3; --skip: #2a2926; --skip-fg: #a8a29e;
+  --oom: #1f2a4a; --oom-fg: #b9c8f5;
   --accent: #f59e0b; --link: #93b4ff;
   color-scheme: dark;
 }
@@ -99,6 +102,7 @@ td.c button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px;
 .s-fail-fetch { background: var(--fetch); color: var(--fetch-fg); }
 .s-timeout { background: var(--timeout); color: var(--timeout-fg); }
 .s-crash { background: var(--crash); color: var(--crash-fg); }
+.s-fail-oom { background: var(--oom); color: var(--oom-fg); }
 .s-skipped { background: var(--skip); color: var(--skip-fg); }
 .na { color: var(--mut); }
 .broke { color: var(--accent); font-size: 12px; }
@@ -161,10 +165,10 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     root.dataset.theme = dark ? "light" : "dark";
     try { localStorage.setItem("crater-theme", root.dataset.theme); } catch (e) {}
   };
-  var SHORT = { "pass": "ok", "pass-unsafe": "ok*", "fail-parse": "parse", "fail-check": "check", "fail-fetch": "fetch", "timeout": "time", "crash": "crash", "skipped": "skip" };
-  var LONG = { "pass": "passes", "pass-unsafe": "passes, relies on unsafe or foreign code", "fail-parse": "fails to parse or load", "fail-check": "fails to check", "fail-fetch": "a dependency could not be fetched", "timeout": "no verdict before the timeout", "crash": "the compiler crashed", "skipped": "not run" };
-  var ORDER = ["pass", "pass-unsafe", "fail-parse", "fail-check", "fail-fetch", "timeout", "crash"];
-  var COLOR = { "pass": "var(--pass-fg)", "pass-unsafe": "var(--unsafe-fg)", "fail-parse": "var(--parse-fg)", "fail-check": "var(--check-fg)", "fail-fetch": "var(--fetch-fg)", "timeout": "var(--timeout-fg)", "crash": "var(--crash-fg)" };
+  var SHORT = { "pass": "ok", "pass-unsafe": "ok*", "fail-parse": "parse", "fail-check": "check", "fail-fetch": "fetch", "fail-oom": "oom", "timeout": "time", "crash": "crash", "skipped": "skip" };
+  var LONG = { "pass": "passes", "pass-unsafe": "passes, relies on unsafe or foreign code", "fail-parse": "fails to parse or load", "fail-check": "fails to check", "fail-fetch": "a dependency could not be fetched", "fail-oom": "went over the memory cap", "timeout": "no verdict before the timeout", "crash": "the compiler crashed", "skipped": "not run" };
+  var ORDER = ["pass", "pass-unsafe", "fail-parse", "fail-check", "fail-fetch", "fail-oom", "timeout", "crash"];
+  var COLOR = { "pass": "var(--pass-fg)", "pass-unsafe": "var(--unsafe-fg)", "fail-parse": "var(--parse-fg)", "fail-check": "var(--check-fg)", "fail-fetch": "var(--fetch-fg)", "fail-oom": "var(--oom-fg)", "timeout": "var(--timeout-fg)", "crash": "var(--crash-fg)" };
   function el(tag, attrs, kids) {
     var e = document.createElement(tag);
     for (var k in attrs || {}) { if (k === "text") e.textContent = attrs[k]; else if (k === "cls") e.className = attrs[k]; else e.setAttribute(k, attrs[k]); }
@@ -177,7 +181,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
   function colSub(c) { return c.kind === "main" ? (c.sha ? c.sha.slice(0, 7) : "") + " (" + c.version + ")" : c.kind === "release" ? (c.date || "").slice(0, 10) : "local"; }
   function pkgLabel(p) { return p.name ? p.name + "@" + p.version : p.hash; }
   function secs(cell) {
-    if (cell.s === "timeout") return ">" + (R.timeoutS || "?") + " s";
+    if (cell.s === "timeout") return ">" + (cell.check_ms != null ? Math.round(cell.check_ms / 1000) : R.timeoutS || "?") + " s";
     var ms = cell.check_ms != null ? cell.check_ms : cell.ms;
     if (ms == null || cell.s === "skipped") return "";
     return (ms < 10000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000)) + " s";
@@ -334,7 +338,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     dc.appendChild(el("div", { cls: "mono", style: "color:var(--mut);margin-top:4px", text: p.hash + " · entry " + p.roots.join(", ") + (p.deps.length ? " · imports " + p.deps.join(", ") : "") }));
     if (cell.x) dc.appendChild(el("pre", { text: cell.x }));
     (cell.run || []).forEach(function (r) {
-      dc.appendChild(el("div", { style: "margin-top:8px", text: "▸ ran main in " + r.f + ": " + (r.s === "ok" ? "exited 0" : r.s === "timeout" ? "still running at the timeout" : "exited non-zero") + " (" + (r.ms / 1000).toFixed(1) + " s)" }));
+      dc.appendChild(el("div", { style: "margin-top:8px", text: "▸ ran main in " + r.f + ": " + (r.s === "ok" ? "exited 0" : r.s === "timeout" ? "still running at the timeout" : r.s === "oom" ? "went over the memory cap" : "exited non-zero") + " (" + (r.ms / 1000).toFixed(1) + " s)" }));
       if (r.x) dc.appendChild(el("pre", { text: r.x }));
     });
     detail.classList.add("open");

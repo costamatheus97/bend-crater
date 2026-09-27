@@ -57,6 +57,27 @@ read the README instead.
   package or dependency file whose line N matches and prefixes the excerpt
   with `at <file>:N`.
 
+## Memory and time limits
+
+- The scheduled run of 2026-09-27 died at cell 571 of 992. Anonymous hash
+  `0xce7bfa94c40ded8493cdb39d330add0c` (published 2026-09-26 18:44 UTC)
+  has a `PROOF.bend` that closes its laws with `{==}`, and checking it
+  grows without bound, at about 450 MB/s, on every release from 2.0.26 to
+  2.0.31 and on `main`. The runner had 16 GB. When it ran out, GitHub sent
+  the runner a shutdown signal: the step ended with exit 143, and every
+  later step was skipped, including the `if: always()` ones.
+- `watch.ts` samples `/proc/<pid>/stat` every 200 ms and adds up the RSS of
+  each watched group: its process group, its session, and any descendant
+  by parent pid. At 450 MB/s, a group overshoots its cap by about 100 MB
+  before it is killed.
+- An address-space limit is no use here. Bun reserves about 6.5 GB of
+  virtual memory at start, and a Bend native binary reserves about 109 GB.
+- With `--jobs` above 1, the groups together may use at most 80% of
+  `MemTotal`. Past that, the largest group is killed and recorded as `oom`.
+- A cell's steps (the check and its retry, the in-place checks, the run
+  lane) share one wall-clock limit, `--cell-timeout`. Each step's timeout
+  is cut to what is left of it.
+
 ## Regressions
 
 - Cells are keyed by compiler id: the version for releases, `main` for main.
