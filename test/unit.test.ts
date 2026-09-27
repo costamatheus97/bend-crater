@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { imports } from "../src/pkg";
 import { brokeIn, regressions, type Results } from "../src/report";
-import { classify, type Proc } from "../src/run";
+import { classify, laneDiff, type Proc } from "../src/run";
 
 const proc = (code: number | null, extra: Partial<Proc> = {}): Proc =>
   ({ code, signal: null, out: "", err: "", ms: 1, timedOut: false, ...extra });
@@ -85,4 +85,12 @@ test("timing: only large, repeated changes above the floor are flagged", async (
   expect(perf.pairs[0].speedups.map((x) => [x.pkg, x.level])).toEqual([["c", "flagged"]]);
   expect(tm.t.a.main).toEqual([15300, 15300]);
   expect(perf.slowest.main[0]).toEqual({ hash: "a", pkg: "a", ms: 15300 });
+});
+
+test("laneDiff names the first line a lane prints differently", () => {
+  expect(laneDiff("1\n2\n", "1\n2\n")).toBe(null);
+  expect(laneDiff("1.4414062\n", "1.4414063\n")).toBe("line 1: io '1.4414062', lane '1.4414063'");
+  expect(laneDiff("a\nb\n", "a\n")).toBe("line 2: io 'b', lane ''");
+  expect(laneDiff("a\n", "a\nb")).toBe("line 2: io '', lane 'b'");
+  expect(laneDiff("a", "a\nb")).toBe("line 2: io (end), lane 'b'");
 });

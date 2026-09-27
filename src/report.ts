@@ -10,6 +10,9 @@ export interface RunOutcome {
   s: "ok" | "fail" | "timeout" | "oom";
   ms: number;
   x?: string;
+  // --lane-diff: per lane (c, js), "same", or how its stdout differs from
+  // the interpreter's, or why the lane did not run
+  lanes?: Record<string, string>;
 }
 
 export interface Cell {

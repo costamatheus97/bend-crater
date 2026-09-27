@@ -65,6 +65,13 @@ before filing anything upstream.
      foreign (`.c`/`.js`) effects, `main` is run once in an empty directory
      with a 20 s timeout. The cell is then marked ▸, or ▸! if that run exited
      non-zero or timed out. The run does not change the check's status.
+   - With `--lane-diff`, a `main` that ran cleanly is also built with
+     `bend -o m.c` (compiled with `$CC -O2`, default `cc`) and `bend -o m.js`
+     (run with `bun`), and each lane's stdout is compared with the
+     interpreter's. The cell gets a `≠` if a lane printed something else,
+     and its details name the first differing line. Off by default: a
+     program that prints the time, a random number or its thread count
+     differs by design.
    - A crash or fetch failure is retried once. A timeout is not retried.
 5. **Compares.** Regressions are listed at the top of the page:
    - **next release:** passes on the latest release, fails on `main`;
@@ -179,6 +186,7 @@ Options (defaults in `crater.json`):
 | `--cell-timeout S` | 900 | the wall-clock limit on each cell: the check, the in-place checks and the run lane together |
 | `--no-rss` | | do not wrap checks in GNU `time` |
 | `--no-run` | | skip the run lane |
+| `--lane-diff` | | also build `main` for the C and JS lanes and compare their output |
 | `--nice` / `--no-nice` | nice locally | run compilers under `nice -n 19` |
 | `--cache DIR` `--data DIR` `--page FILE` | `cache` `data` `docs/index.html` | where things go |
 

@@ -3,7 +3,7 @@
 //
 //   bun src/crater.ts [--releases N] [--no-main] [--bend PATH]... [--only RE]
 //                     [--anon edges|all|none] [--jobs N] [--timeout S]
-//                     [--run-timeout S] [--no-run] [--no-nice] [--dry]
+//                     [--run-timeout S] [--no-run] [--lane-diff] [--no-nice] [--dry]
 //                     [--cache DIR] [--data DIR] [--page FILE]
 //                     [--releases-json FILE] [--no-rss] [--budget-min M]
 //                     [--mem-cap MB] [--cell-timeout S]
@@ -18,7 +18,7 @@ import { listPackages, Store, type HubPackage } from "./hub";
 import { checkpointFile, finalize, writeCheckpoint, type Checkpoint } from "./finalize";
 import { inspect, type PkgInfo } from "./pkg";
 import { label, type Cell, type PkgRow, type Runner, type RunOutcome } from "./report";
-import { classify, clean, exec, excerpt, isPass, peakKb, rssTool, stopAll, type ExecOpts, type Proc, type Status } from "./run";
+import { classify, clean, exec, excerpt, isPass, laneDiff, peakKb, rssTool, stopAll, type ExecOpts, type Proc, type Status } from "./run";
 import { available as watchdog, memTotalKb, setTotalCap } from "./watch";
 import { log, readJson, ROOT } from "./util";
 
@@ -36,6 +36,7 @@ interface Config {
   timeout: number;
   runTimeout: number;
   run: boolean;
+  laneDiff: boolean;
   nice: boolean;
   cache: string;
   data: string;
@@ -53,7 +54,7 @@ function config(argv: string[]): Config {
   const file = readJson<Partial<Config>>(path.join(ROOT, "crater.json"), {});
   const c: Config = {
     hub: "https://hub.bend-lang.com", releases: 6, main: true, mainRef: "main", bend: [], only: null,
-    anon: "edges", jobs: 1, timeout: 120, runTimeout: 20, run: true, nice: !process.env.CI,
+    anon: "edges", jobs: 1, timeout: 120, runTimeout: 20, run: true, laneDiff: false, nice: !process.env.CI,
     cache: "cache", data: "data", page: "docs/index.html", historyKeep: 90, releasesJson: null, rss: true, budgetMin: 300,
     memCapMb: 4096, cellTimeout: 900, dry: false, ...file,
   };
@@ -70,6 +71,7 @@ function config(argv: string[]): Config {
       case "--timeout": c.timeout = parseInt(v(), 10); break;
       case "--run-timeout": c.runTimeout = parseInt(v(), 10); break;
       case "--no-run": c.run = false; break;
+      case "--lane-diff": c.laneDiff = true; break;
       case "--no-rss": c.rss = false; break;
       case "--budget-min": c.budgetMin = parseInt(v(), 10); break;
       case "--mem-cap": c.memCapMb = parseInt(v(), 10); break;
@@ -496,19 +498,50 @@ async function main(): Promise<void> {
         }
         const cwd = fs.mkdtempSync(path.join(work, "run-"));
         const p = await exec([...c.cmd, path.join(store.lib, r.hash, f)], lim(cfg.runTimeout, cwd));
-        fs.rmSync(cwd, { recursive: true, force: true });
         if (p.stopped) {
+          fs.rmSync(cwd, { recursive: true, force: true });
           return null;
         }
         const text = clean(p.err + "\n" + p.out, subs);
         const ro: RunOutcome = { f, s: p.oom ? "oom" : p.timedOut ? "timeout" : p.code === 0 ? "ok" : "fail", ms: p.ms };
         if (ro.s !== "ok") {
           ro.x = ro.s === "oom" ? oomText(p) : ro.s === "timeout" ? `main ran past ${Math.round(p.ms / 1000)} s` : excerpt(text, 5);
+        } else if (cfg.laneDiff) {
+          ro.lanes = await lanes(c, path.join(store.lib, r.hash, f), cwd, p.out, lim);
         }
+        fs.rmSync(cwd, { recursive: true, force: true });
         out.run.push(ro);
       }
     }
     return out;
+  }
+
+  // lanes builds main with `-o` for the C lane (cc -O2) and the JS lane
+  // (bun) under the check's timeout, runs each in the run's directory under
+  // the run's timeout, and compares its stdout with the interpreter's. A
+  // program that prints its thread count, the time or a random number
+  // differs by design; F32 math, prints and parses should not.
+  async function lanes(c: Col, file: string, cwd: string, io: string, lim: (capS: number, cwd?: string) => ExecOpts): Promise<Record<string, string>> {
+    const got: Record<string, string> = {};
+    const steps: Record<string, string[][]> = {
+      c: [[...c.cmd, file, "-o", "m.c"], [process.env.CC ?? "cc", "-std=c11", "-O2", "m.c", "-lpthread", "-lm", "-o", "m"], ["./m"]],
+      js: [[...c.cmd, file, "-o", "m.js"], ["bun", "m.js"]],
+    };
+    for (const [lane, argvs] of Object.entries(steps)) {
+      for (const [i, argv] of argvs.entries()) {
+        const last = i === argvs.length - 1;
+        const p = await exec(argv, lim(last ? cfg.runTimeout : cfg.timeout, cwd));
+        if (p.timedOut || p.code !== 0) {
+          const why = p.timedOut ? "timed out" : "exited " + (p.code ?? p.signal);
+          got[lane] = (last ? "ran" : "build " + (i + 1)) + " " + why + ": " + excerpt(clean(p.err + "\n" + p.out, subs), 2);
+          break;
+        }
+        if (last) {
+          got[lane] = laneDiff(io, p.out) ?? "same";
+        }
+      }
+    }
+    return got;
   }
 }
 

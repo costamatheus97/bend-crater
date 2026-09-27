@@ -303,11 +303,12 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
       else {
         if (isFail(cell.s)) failing = true;
         var runBad = cell.run && cell.run.some(function (r) { return r.s !== "ok"; });
+        var laneBad = cell.run && cell.run.some(function (r) { return r.lanes && Object.keys(r.lanes).some(function (k) { return r.lanes[k] !== "same"; }); });
         var t = secs(cell);
         if (cell.check_ms != null && cell.check_ms > slowMs) slowMs = cell.check_ms;
         if (cell.s === "timeout") slowMs = Infinity;
         var b = el("button", { type: "button", cls: "s-" + cell.s, "aria-label": pkgLabel(p) + " on " + colName(c) + ": " + LONG[cell.s] + (t ? ", " + t : ""), title: t },
-          [SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : ""), t ? el("small", { cls: cell.s === "timeout" || cell.check_ms >= 10000 ? "t2" : cell.check_ms >= 1000 ? "t1" : "", text: t }) : null]);
+          [SHORT[cell.s] + (cell.run ? (runBad ? " ▸!" : " ▸") : "") + (laneBad ? "≠" : ""), t ? el("small", { cls: cell.s === "timeout" || cell.check_ms >= 10000 ? "t2" : cell.check_ms >= 1000 ? "t1" : "", text: t }) : null]);
         b.onclick = function () { show(p, c, cell); };
         td.appendChild(b);
       }
@@ -350,6 +351,7 @@ footer { margin-top: 40px; color: var(--mut); font-size: 13px; }
     (cell.run || []).forEach(function (r) {
       dc.appendChild(el("div", { style: "margin-top:8px", text: "▸ ran main in " + r.f + ": " + (r.s === "ok" ? "exited 0" : r.s === "timeout" ? "still running at the timeout" : r.s === "oom" ? "went over the memory cap" : "exited non-zero") + " (" + (r.ms / 1000).toFixed(1) + " s)" }));
       if (r.x) dc.appendChild(el("pre", { text: r.x }));
+      if (r.lanes) dc.appendChild(el("pre", { text: Object.keys(r.lanes).map(function (k) { return k + " lane: " + r.lanes[k]; }).join("\n") }));
     });
     detail.classList.add("open");
   }
