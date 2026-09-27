@@ -29,6 +29,7 @@ export interface Checkpoint {
   pending: [string, string][]; // [hash, compiler id] of the cells not run yet
   total: number;               // cells the run meant to run
   out: { data: string; page: string; historyKeep: number };
+  pid?: number;                // the crater process that writes it
   finalized?: boolean;
 }
 
@@ -88,6 +89,36 @@ export function finalizeFile(file: string, reason: string | null): Results | nul
   return res;
 }
 
+// stopCrater stops the crater process that wrote a checkpoint, if it is
+// still running: a crater that outlived its step (a cancel that signalled
+// only the step's shell) would otherwise go on rewriting the checkpoint
+// while this finalizes it. SIGTERM lets it finalize itself; SIGKILL follows
+// if it has not exited within graceMs. The pid is only signalled while its
+// command line is still a crater run.
+export async function stopCrater(pid: number | undefined, graceMs = 8000): Promise<string> {
+  const isCrater = () => {
+    try {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes("src/crater.ts");
+    } catch {
+      return false;
+    }
+  };
+  if (pid === undefined || pid === process.pid || !isCrater()) {
+    return "not running";
+  }
+  process.kill(pid, "SIGTERM");
+  for (let t = 0; t < graceMs; t += 100) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (!isCrater()) {
+      return "stopped by SIGTERM";
+    }
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch { /* gone */ }
+  return "killed";
+}
+
 if (import.meta.main) {
   let cache = path.join(ROOT, "cache");
   let reason = "the crater process was killed";
@@ -100,6 +131,11 @@ if (import.meta.main) {
     } else {
       throw new Error("unknown option " + argv[i]);
     }
+  }
+  const pid = readJson<Checkpoint | null>(checkpointFile(cache), null)?.pid;
+  const how = await stopCrater(pid);
+  if (how !== "not running") {
+    log(`finalize: the crater (pid ${pid}) was still running: ${how}`);
   }
   const res = finalizeFile(checkpointFile(cache), reason);
   if (res === null) {

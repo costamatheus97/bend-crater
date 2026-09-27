@@ -82,13 +82,17 @@ jobs:
           RELEASES: ${{ inputs.releases || '6' }}
           ANON: ${{ inputs.anon || 'edges' }}
           ONLY: ${{ inputs.only || '' }}
+        # exec: on a cancel or a timeout, the runner signals the step's shell
+        # only; with exec, that is the crater, which then finishes a partial
+        # run itself instead of being left running as an orphan
         run: >
-          scripts/scoped.sh "$(command -v bun)" src/crater.ts --jobs 1 --no-nice
+          exec scripts/scoped.sh "$(command -v bun)" src/crater.ts --jobs 1 --no-nice
           --releases "$RELEASES" --anon "$ANON" ${ONLY:+--only "$ONLY"}
           --releases-json cache/releases.json
 
       # A crater that was killed outright (not stopped) left a checkpoint
-      # and no outputs: write them from it, as a partial run.
+      # and no outputs: write them from it, as a partial run. One still
+      # running is stopped first, by the pid its checkpoint records.
       - name: Finish a run that did not
         if: failure() || cancelled()
         env:

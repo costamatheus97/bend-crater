@@ -347,7 +347,7 @@ async function main(): Promise<void> {
       runner: runnerInfo(rss), timeoutS: cfg.timeout,
       memCapMb: watchdog() ? cfg.memCapMb : 0, cellTimeoutS: cfg.cellTimeout,
     },
-    t0, pending: [], total: tasks.length,
+    t0, pending: [], total: tasks.length, pid: process.pid,
     out: { data: dataDir, page: path.resolve(ROOT, cfg.page), historyKeep: cfg.historyKeep },
   };
   const cpFile = checkpointFile(cache);

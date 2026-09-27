@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { checkpointFile, finalizeFile, writeCheckpoint, type Checkpoint } from "../src/finalize";
+import { checkpointFile, finalizeFile, stopCrater, writeCheckpoint, type Checkpoint } from "../src/finalize";
 import type { HistoryEntry, Results } from "../src/report";
 import { validate } from "../src/validate";
 
@@ -81,4 +81,14 @@ test("validate refuses stale, empty and malformed outputs", () => {
   expect(validate({ schema: 2 }, hist, tm, null)).toEqual(["results.json: not a schema 1 result"]);
   expect(validate(res, [], tm, null)).toEqual(["history.json: its last entry is not this run"]);
   expect(validate(null, null, null, null)).toEqual(["results.json: not a schema 1 result"]);
+});
+
+test("stopCrater signals only a live crater process", async () => {
+  expect(await stopCrater(undefined)).toBe("not running");
+  expect(await stopCrater(process.pid)).toBe("not running");
+  // a live process that is not a crater run is left alone
+  const p = Bun.spawn(["sleep", "5"]);
+  expect(await stopCrater(p.pid)).toBe("not running");
+  expect(p.exitCode).toBe(null);
+  p.kill();
 });

@@ -135,6 +135,14 @@ read the README instead.
   - If the process is killed outright, the `if: failure() || cancelled()`
     step runs `src/finalize.ts`, which finalizes the checkpoint it left. It
     does nothing when the checkpoint was finalized already.
+  - On a cancel, the runner signals the step's shell only. In the first
+    cancel test (run 36318734909), bun went on checking for about 50 s,
+    was still running when the fallback finalized, and was killed as an
+    orphan at job cleanup. The step now `exec`s the crater, so the shell's
+    pid is bun's, and `finalize.ts` first stops a crater still running, by
+    the pid its checkpoint records and only while that pid's command line
+    is a crater run. It sends SIGTERM (the crater then finalizes itself),
+    and SIGKILL after 8 s.
   - The artifact is uploaded only when the checkpoint was finalized, so a
     run that died before its checks uploads nothing.
   - `publish` runs on `always()`, and `deploy` on `always()` plus publish's
