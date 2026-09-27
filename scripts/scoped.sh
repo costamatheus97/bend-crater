@@ -19,10 +19,14 @@ if [ "$max" -gt 0 ] && command -v systemd-run >/dev/null 2>&1; then
     echo "scoped.sh: user scope, MemoryMax=$((max / 1024)) MB" >&2
     exec systemd-run --user --scope --quiet "${props[@]}" -- "$@"
   fi
-  if sudo -n systemd-run --scope --quiet "${props[@]}" --uid="$(id -u)" --gid="$(id -g)" true >/dev/null 2>&1; then
+  # sudo resets the environment (and PATH, to secure_path), so what the
+  # crater reads from it is passed on through env, in the same form as the
+  # probe, which runs exactly this command with `true`.
+  sys=(sudo -n systemd-run --scope --quiet "${props[@]}" --uid="$(id -u)" --gid="$(id -g)" --
+    env "PATH=$PATH" "HOME=$HOME" "CI=${CI:-}" "ImageOS=${ImageOS:-}" "ImageVersion=${ImageVersion:-}")
+  if "${sys[@]}" true >/dev/null 2>&1; then
     echo "scoped.sh: system scope, MemoryMax=$((max / 1024)) MB" >&2
-    # sudo resets PATH (secure_path) and some of the environment: pass it on
-    exec sudo -n --preserve-env systemd-run --scope --quiet "${props[@]}" --uid="$(id -u)" --gid="$(id -g)" -- env "PATH=$PATH" "HOME=$HOME" "$@"
+    exec "${sys[@]}" "$@"
   fi
 fi
 echo "scoped.sh: no systemd scope available; running without a whole-run memory cap" >&2
